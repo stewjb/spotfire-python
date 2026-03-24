@@ -646,3 +646,43 @@ class SbdfPolarsTest(unittest.TestCase):
         self.assertIsInstance(result, pl.DataFrame)
         self.assertEqual(result["strings"].to_list(), ["foo", "bar", "baz"])
         self.assertAlmostEqual(result["floats"][0], 1.5)
+
+    def test_invalid_output_format(self):
+        """Passing an unknown output_format should raise SBDFError immediately."""
+        polars_df = pl.DataFrame({"x": [1, 2, 3]})
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = f"{tempdir}/output.sbdf"
+            sbdf.export_data(polars_df, path)
+            with self.assertRaises(sbdf.SBDFError):
+                sbdf.import_data(path, output_format="numpy")
+
+    def test_write_polars_empty(self):
+        """Exporting an empty Polars DataFrame should produce a valid (empty) SBDF file."""
+        polars_df = pl.DataFrame({"a": pl.Series([], dtype=pl.Int32),
+                                  "b": pl.Series([], dtype=pl.Utf8)})
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = f"{tempdir}/empty.sbdf"
+            sbdf.export_data(polars_df, path)
+            result = sbdf.import_data(path)
+        self.assertEqual(len(result), 0)
+        self.assertIn("a", result.columns)
+        self.assertIn("b", result.columns)
+
+    def test_write_polars_series_nulls(self):
+        """Exporting a Polars Series with null values should preserve those nulls."""
+        series = pl.Series("vals", [1, None, 3], dtype=pl.Int32)
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = f"{tempdir}/series_nulls.sbdf"
+            sbdf.export_data(series, path)
+            result = sbdf.import_data(path)
+        self.assertTrue(pd.isnull(result["vals"][1]))
+        self.assertEqual(int(result["vals"][0]), 1)
+        self.assertEqual(int(result["vals"][2]), 3)
+
+    def test_polars_categorical_warns(self):
+        """Exporting a Polars Categorical column should emit a SBDFWarning."""
+        polars_df = pl.DataFrame({"cat": pl.Series(["x", "y", "x"]).cast(pl.Categorical)})
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = f"{tempdir}/cat_warn.sbdf"
+            with self.assertWarns(sbdf.SBDFWarning):
+                sbdf.export_data(polars_df, path)

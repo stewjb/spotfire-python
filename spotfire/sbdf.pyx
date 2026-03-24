@@ -860,6 +860,10 @@ def import_data(sbdf_file, output_format="pandas"):
         if error != sbdf_c.SBDF_OK and error != sbdf_c.SBDF_TABLEEND:
             raise SBDFError(f"error reading '{sbdf_file}': {sbdf_c.sbdf_err_get_str(error).decode('utf-8')}")
 
+        # Validate output_format before doing anything with it
+        if output_format not in ("pandas", "polars"):
+            raise SBDFError(f"unknown output_format {output_format!r}; expected 'pandas' or 'polars'")
+
         # Build a Polars DataFrame directly if requested, with no Pandas intermediary
         if output_format == "polars":
             if pl is None:
@@ -1165,6 +1169,8 @@ cdef int _export_infer_valuetype_from_polars_dtype(dtype, series_description):
         return sbdf_c.SBDF_DECIMALTYPEID
     elif dtype_name in ("Categorical", "Enum"):
         # SBDF has no categorical type; export as String
+        warnings.warn(f"Polars {dtype_name} type in {series_description} will be exported as String; "
+                      f"category information will not be preserved", SBDFWarning)
         return sbdf_c.SBDF_STRINGTYPEID
     else:
         raise SBDFError(f"unknown Polars dtype '{dtype_name}' in {series_description}")
