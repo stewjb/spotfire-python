@@ -429,6 +429,11 @@ cdef class _ImportContext:
         """Return True if the numpy type for this column is NPY_OBJECT.
 
         :return: True if the numpy type is object, False otherwise
+
+        .. note:: ``numpy_type_num`` is a ``cdef`` attribute and is therefore inaccessible from
+                  Python-side ``cdef object`` functions.  This ``cpdef`` wrapper exposes it so that
+                  :func:`_import_build_polars_dataframe` can branch on it without touching the
+                  Cython-only attribute directly.
         """
         return self.numpy_type_num == np_c.NPY_OBJECT
 
@@ -729,10 +734,9 @@ cdef object _import_build_polars_dataframe(column_names, importer_contexts):
             if invalids.any():
                 indices = np.where(invalids)[0].tolist()
                 try:
-                    col = col.scatter(indices, None)
+                    col = col.scatter(indices, None)  # Polars >= 0.19
                 except AttributeError:
-                    # Fallback for older Polars versions that use set_at_idx
-                    col = col.set_at_idx(indices, None)
+                    col = col.set_at_idx(indices, None)  # Polars < 0.19 API
 
         series_list.append(col)
 
@@ -864,7 +868,10 @@ def import_data(sbdf_file, output_format="pandas"):
         if output_format not in ("pandas", "polars"):
             raise SBDFError(f"unknown output_format {output_format!r}; expected 'pandas' or 'polars'")
 
-        # Build a Polars DataFrame directly if requested, with no Pandas intermediary
+        # Short-circuit before pd.concat to avoid the Pandas intermediary entirely.
+        # This keeps the import zero-copy for large DataFrames: numpy arrays collected
+        # by each _ImportContext go straight into Polars Series without ever becoming
+        # a Pandas DataFrame.
         if output_format == "polars":
             if pl is None:
                 raise SBDFError("polars is not installed; install it with 'pip install spotfire[polars]'")
@@ -1134,6 +1141,10 @@ cdef int _export_infer_valuetype_from_polars_dtype(dtype, series_description):
     :return: the integer value type id representing the type of series
     :raise SBDFError: if the dtype is unknown
     """
+    # Use __class__.__name__ rather than isinstance() checks.  Polars dtype objects are
+    # not ordinary Python classes resolvable at Cython compile time, so isinstance() would
+    # require importing the exact dtype class — which breaks when Polars isn't installed.
+    # Class name strings are stable across the Polars versions we support (>= 0.20).
     dtype_name = dtype.__class__.__name__
     if dtype_name == "Boolean":
         return sbdf_c.SBDF_BOOLTYPEID
@@ -1173,7 +1184,9 @@ cdef int _export_infer_valuetype_from_polars_dtype(dtype, series_description):
                       f"category information will not be preserved", SBDFWarning)
         return sbdf_c.SBDF_STRINGTYPEID
     elif dtype_name == "Null":
-        # All-null series with no inferred type; export as an all-invalid String column
+        # pl.Series([None, None]) has dtype Null when no type can be inferred.  Export as
+        # String; _export_polars_series_to_numpy produces a placeholder array and the
+        # invalids mask marks every row missing, so the stored values are never read.
         return sbdf_c.SBDF_STRINGTYPEID
     else:
         raise SBDFError(f"unknown Polars dtype '{dtype_name}' in {series_description}")
@@ -1188,7 +1201,9 @@ cdef np_c.ndarray _export_polars_series_to_numpy(_ExportContext context, series)
     """
     dtype_name = series.dtype.__class__.__name__
     if dtype_name == "Null":
-        # All-null series: produce an object array of Nones; invalids mask will cover all rows
+        # A Null-dtype series has no values to convert; return a same-length placeholder array.
+        # The invalids mask (set by the caller via series.is_null()) marks every row as missing,
+        # so the placeholder values are never read by the SBDF writer.
         return np.full(len(series), None, dtype=object)
     if dtype_name in ("Categorical", "Enum"):
         # Cast to String so .to_numpy() returns plain Python strings
