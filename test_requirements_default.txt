@@ -2,5 +2,6 @@ html-testRunner
 geopandas
 matplotlib
 pillow
+polars
 seaborn
 shapely
