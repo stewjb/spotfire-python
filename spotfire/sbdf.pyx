@@ -1172,6 +1172,9 @@ cdef int _export_infer_valuetype_from_polars_dtype(dtype, series_description):
         warnings.warn(f"Polars {dtype_name} type in {series_description} will be exported as String; "
                       f"category information will not be preserved", SBDFWarning)
         return sbdf_c.SBDF_STRINGTYPEID
+    elif dtype_name == "Null":
+        # All-null series with no inferred type; export as an all-invalid String column
+        return sbdf_c.SBDF_STRINGTYPEID
     else:
         raise SBDFError(f"unknown Polars dtype '{dtype_name}' in {series_description}")
 
@@ -1184,6 +1187,9 @@ cdef np_c.ndarray _export_polars_series_to_numpy(_ExportContext context, series)
     :return: NumPy ndarray of values
     """
     dtype_name = series.dtype.__class__.__name__
+    if dtype_name == "Null":
+        # All-null series: produce an object array of Nones; invalids mask will cover all rows
+        return np.full(len(series), None, dtype=object)
     if dtype_name in ("Categorical", "Enum"):
         # Cast to String so .to_numpy() returns plain Python strings
         series = series.cast(pl.Utf8)

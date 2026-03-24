@@ -686,3 +686,15 @@ class SbdfPolarsTest(unittest.TestCase):
             path = f"{tempdir}/cat_warn.sbdf"
             with self.assertWarns(sbdf.SBDFWarning):
                 sbdf.export_data(polars_df, path)
+
+    def test_write_polars_null_dtype(self):
+        """Exporting a Polars all-null Series (dtype=Null) should produce an all-invalid column."""
+        polars_df = pl.DataFrame({"nothing": pl.Series([None, None, None])})
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = f"{tempdir}/null_dtype.sbdf"
+            sbdf.export_data(polars_df, path)
+            result = sbdf.import_data(path)
+        self.assertEqual(len(result), 3)
+        self.assertTrue(pd.isnull(result["nothing"][0]))
+        self.assertTrue(pd.isnull(result["nothing"][1]))
+        self.assertTrue(pd.isnull(result["nothing"][2]))
