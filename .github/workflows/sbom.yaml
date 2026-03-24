@@ -147,6 +147,16 @@ jobs:
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Also download the sdist so scan-env can install from it (wheel is platform-specific)
+      - name: Download sdist (from workflow_run)
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
       # push / release / workflow_dispatch: build fresh on Linux
       - name: Set Up Python
         if: github.event_name != 'workflow_run'
@@ -164,11 +174,13 @@ jobs:
           python -m build --wheel
           auditwheel repair -w ../dist --plat manylinux2014_x86_64 dist/*.whl
 
-      # Install wheel into isolated venv so we can freeze its dependencies
-      - name: Install wheel into scan-env
+      # Install via sdist into scan-env to freeze dependencies.
+      # We cannot install the manylinux wheel directly on the runner (platform mismatch).
+      # The dependency set is identical between sdist and wheel installs.
+      - name: Install into scan-env for dependency freeze
         run: |
           python -m venv scan-env
-          scan-env/bin/pip install --quiet dist/spotfire-*.whl
+          scan-env/bin/pip install --quiet dist/spotfire-*.tar.gz
 
       - name: Set SBOM metadata
         id: meta
