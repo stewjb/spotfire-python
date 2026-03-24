@@ -703,7 +703,7 @@ cdef object _import_polars_dtype(_ImportContext context):
     elif vt_id == sbdf_c.SBDF_DECIMALTYPEID:
         return pl.Decimal
     else:
-        return pl.Utf8
+        raise SBDFError(f"unsupported SBDF value type id {vt_id} for Polars output")
 
 
 cdef object _import_build_polars_dataframe(column_names, importer_contexts):
@@ -748,6 +748,10 @@ def import_data(sbdf_file, output_format="pandas"):
     :return: the DataFrame containing the imported data
     :raises SBDFError: if a problem is encountered during import
     """
+    # Validate output_format before opening the file so we fail fast on bad input.
+    if output_format not in ("pandas", "polars"):
+        raise SBDFError(f"unknown output_format {output_format!r}; expected 'pandas' or 'polars'")
+
     cdef int error, i
     cdef stdio.FILE* input_file = NULL
     cdef int major_v, minor_v
@@ -860,10 +864,6 @@ def import_data(sbdf_file, output_format="pandas"):
 
         if error != sbdf_c.SBDF_OK and error != sbdf_c.SBDF_TABLEEND:
             raise SBDFError(f"error reading '{sbdf_file}': {sbdf_c.sbdf_err_get_str(error).decode('utf-8')}")
-
-        # Validate output_format before doing anything with it
-        if output_format not in ("pandas", "polars"):
-            raise SBDFError(f"unknown output_format {output_format!r}; expected 'pandas' or 'polars'")
 
         # Short-circuit before pd.concat to avoid the Pandas intermediary entirely.
         # This keeps the import zero-copy for large DataFrames: numpy arrays collected
@@ -1210,6 +1210,10 @@ cdef np_c.ndarray _export_polars_series_to_numpy(_ExportContext context, series)
         # The Date/Time exporters require Python date/time objects;
         # Polars .to_numpy() returns numpy datetime64/int64 which those exporters do not accept.
         return np.asarray(series.to_list(), dtype=object)
+    if dtype_name in ("Datetime", "Duration"):
+        # Keep native datetime64/timedelta64 arrays; the invalids mask handles nulls (NaT cells
+        # are marked invalid and ignored by the SBDF writer).  Boxing to object would be slower.
+        return series.to_numpy(allow_copy=True)
     na_value = context.get_numpy_na_value()
     if na_value is not None:
         return np.asarray(series.fill_null(na_value).to_numpy(allow_copy=True),
@@ -1236,7 +1240,10 @@ cdef _export_obj_polars_dataframe(obj):
         column_names.append(col)
         context = _ExportContext()
         context.set_valuetype_id(_export_infer_valuetype_from_polars_dtype(series.dtype, f"column '{col}'"))
-        invalids = series.is_null().to_numpy()
+        if series.dtype.__class__.__name__ in ("Float32", "Float64"):
+            invalids = (series.is_null() | series.is_nan()).to_numpy()
+        else:
+            invalids = series.is_null().to_numpy()
         context.set_arrays(_export_polars_series_to_numpy(context, series), invalids)
         column_metadata.append({})
         exporter_contexts.append(context)
@@ -1257,7 +1264,10 @@ cdef _export_obj_polars_series(obj, default_column_name):
 
     context = _ExportContext()
     context.set_valuetype_id(_export_infer_valuetype_from_polars_dtype(obj.dtype, description))
-    invalids = obj.is_null().to_numpy()
+    if obj.dtype.__class__.__name__ in ("Float32", "Float64"):
+        invalids = (obj.is_null() | obj.is_nan()).to_numpy()
+    else:
+        invalids = obj.is_null().to_numpy()
     context.set_arrays(_export_polars_series_to_numpy(context, obj), invalids)
 
     return {}, [column_name], [{}], [context]

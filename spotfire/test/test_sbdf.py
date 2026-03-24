@@ -698,3 +698,14 @@ class SbdfPolarsTest(unittest.TestCase):
         self.assertTrue(pd.isnull(result["nothing"][0]))
         self.assertTrue(pd.isnull(result["nothing"][1]))
         self.assertTrue(pd.isnull(result["nothing"][2]))
+
+    def test_write_polars_float_nan(self):
+        """NaN in a Polars float column should be treated as invalid (missing), not a real value."""
+        polars_df = pl.DataFrame({"vals": pl.Series([1.0, float("nan"), 3.0])})
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = f"{tempdir}/float_nan.sbdf"
+            sbdf.export_data(polars_df, path)
+            result = sbdf.import_data(path)
+        self.assertAlmostEqual(result["vals"][0], 1.0)
+        self.assertTrue(pd.isnull(result["vals"][1]))
+        self.assertAlmostEqual(result["vals"][2], 3.0)
