@@ -727,7 +727,12 @@ cdef object _import_build_polars_dataframe(column_names, importer_contexts):
             # Numeric arrays: numpy → Polars Series directly, then scatter nulls if needed.
             col = pl.Series(name=name, values=values, dtype=polars_dtype)
             if invalids.any():
-                col = col.scatter(np.where(invalids)[0].tolist(), None)
+                indices = np.where(invalids)[0].tolist()
+                try:
+                    col = col.scatter(indices, None)
+                except AttributeError:
+                    # Fallback for older Polars versions that use set_at_idx
+                    col = col.set_at_idx(indices, None)
 
         series_list.append(col)
 
@@ -1131,6 +1136,9 @@ cdef int _export_infer_valuetype_from_polars_dtype(dtype, series_description):
     elif dtype_name in ("Int8", "Int16", "Int32", "UInt8", "UInt16"):
         return sbdf_c.SBDF_INTTYPEID
     elif dtype_name in ("Int64", "UInt32", "UInt64"):
+        if dtype_name == "UInt64":
+            warnings.warn(f"Polars UInt64 type in {series_description} will be exported as LongInteger (signed "
+                          f"64-bit); values above 9,223,372,036,854,775,807 will overflow", SBDFWarning)
         return sbdf_c.SBDF_LONGTYPEID
     elif dtype_name == "Float32":
         return sbdf_c.SBDF_FLOATTYPEID
@@ -1141,6 +1149,9 @@ cdef int _export_infer_valuetype_from_polars_dtype(dtype, series_description):
     elif dtype_name == "Date":
         return sbdf_c.SBDF_DATETYPEID
     elif dtype_name == "Datetime":
+        if getattr(dtype, 'time_zone', None) is not None:
+            warnings.warn(f"Polars Datetime type in {series_description} has timezone '{dtype.time_zone}'; "
+                          f"timezone information will not be preserved in SBDF", SBDFWarning)
         return sbdf_c.SBDF_DATETIMETYPEID
     elif dtype_name == "Duration":
         return sbdf_c.SBDF_TIMESPANTYPEID
@@ -1149,9 +1160,12 @@ cdef int _export_infer_valuetype_from_polars_dtype(dtype, series_description):
     elif dtype_name == "Binary":
         return sbdf_c.SBDF_BINARYTYPEID
     elif dtype_name == "Decimal":
+        warnings.warn(f"Polars Decimal type in {series_description} export is experimental; "
+                      f"precision may not be fully preserved", SBDFWarning)
         return sbdf_c.SBDF_DECIMALTYPEID
-    elif dtype_name == "Categorical":
-        return _export_infer_valuetype_from_polars_dtype(dtype.categories, series_description)
+    elif dtype_name in ("Categorical", "Enum"):
+        # SBDF has no categorical type; export as String
+        return sbdf_c.SBDF_STRINGTYPEID
     else:
         raise SBDFError(f"unknown Polars dtype '{dtype_name}' in {series_description}")
 
@@ -1164,6 +1178,10 @@ cdef np_c.ndarray _export_polars_series_to_numpy(_ExportContext context, series)
     :return: NumPy ndarray of values
     """
     dtype_name = series.dtype.__class__.__name__
+    if dtype_name in ("Categorical", "Enum"):
+        # Cast to String so .to_numpy() returns plain Python strings
+        series = series.cast(pl.Utf8)
+        dtype_name = "Utf8"
     if dtype_name in ("Date", "Time"):
         # The Date/Time exporters require Python date/time objects;
         # Polars .to_numpy() returns numpy datetime64/int64 which those exporters do not accept.

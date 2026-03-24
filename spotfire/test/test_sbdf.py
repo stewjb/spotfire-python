@@ -605,6 +605,33 @@ class SbdfPolarsTest(unittest.TestCase):
         # Verify nulls are preserved natively
         self.assertIsNone(dataframe["Long"][0])
 
+    def test_write_polars_categorical(self):
+        """Exporting a Polars Categorical column should export as String."""
+        polars_df = pl.DataFrame({"cat": pl.Series(["a", "b", "a"]).cast(pl.Categorical)})
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = f"{tempdir}/output.sbdf"
+            sbdf.export_data(polars_df, path)
+            result = sbdf.import_data(path)
+        self.assertEqual(result["cat"].tolist(), ["a", "b", "a"])
+
+    def test_write_polars_uint64_warns(self):
+        """Exporting a Polars UInt64 column should emit a warning about overflow risk."""
+        polars_df = pl.DataFrame({"big": pl.Series([1, 2, 3], dtype=pl.UInt64)})
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = f"{tempdir}/output.sbdf"
+            with self.assertWarns(sbdf.SBDFWarning):
+                sbdf.export_data(polars_df, path)
+
+    def test_write_polars_datetime_tz(self):
+        """Exporting a timezone-aware Polars Datetime column should warn about timezone loss."""
+        polars_df = pl.DataFrame({
+            "ts": pl.Series([datetime.datetime(2024, 1, 1)]).dt.replace_time_zone("UTC")
+        })
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = f"{tempdir}/output.sbdf"
+            with self.assertWarns(sbdf.SBDFWarning):
+                sbdf.export_data(polars_df, path)
+
     def test_polars_roundtrip(self):
         """A Polars DataFrame should survive an export/import roundtrip."""
         original = pl.DataFrame({
