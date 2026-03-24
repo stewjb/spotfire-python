@@ -733,10 +733,7 @@ cdef object _import_build_polars_dataframe(column_names, importer_contexts):
             col = pl.Series(name=name, values=values, dtype=polars_dtype)
             if invalids.any():
                 indices = np.where(invalids)[0].tolist()
-                try:
-                    col = col.scatter(indices, None)  # Polars >= 0.19
-                except AttributeError:
-                    col = col.set_at_idx(indices, None)  # Polars < 0.19 API
+                col = col.scatter(indices, None)
 
         series_list.append(col)
 
