@@ -20,7 +20,7 @@ from packaging import version
 import spotfire
 
 try:
-    import polars as pl
+    import polars as pl  # type: ignore[import-not-found]
 except ImportError:
     pl = None  # type: ignore[assignment]
 from spotfire import sbdf
