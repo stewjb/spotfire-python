@@ -18,6 +18,11 @@ import PIL.Image
 from packaging import version
 
 import spotfire
+
+try:
+    import polars as pl
+except ImportError:
+    pl = None
 from spotfire import sbdf
 from spotfire.test import utils
 
@@ -539,3 +544,75 @@ class SbdfTest(unittest.TestCase):
     def _assert_is_png_image(self, expr: bytes) -> None:
         """Assert that a bytes object represents PNG image data."""
         self.assertEqual(expr[0:8], b'\x89PNG\x0d\x0a\x1a\x0a')
+
+
+@unittest.skipIf(pl is None, "polars not installed")
+class SbdfPolarsTest(unittest.TestCase):
+    """Unit tests for Polars DataFrame support in 'spotfire.sbdf' module."""
+
+    def test_write_polars_dataframe_basic(self):
+        """Exporting a Polars DataFrame with common types should produce a valid SBDF file."""
+        df = pl.DataFrame({
+            "flag": [True, False, True],
+            "count": [1, 2, 3],
+            "value": [1.1, 2.2, 3.3],
+            "label": ["a", "b", "c"],
+        })
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = f"{tempdir}/output.sbdf"
+            sbdf.export_data(df, path)
+            result = sbdf.import_data(path)
+        self.assertEqual(len(result), 3)
+        self.assertEqual(list(result.columns), ["flag", "count", "value", "label"])
+        self.assertEqual(result["flag"].tolist(), [True, False, True])
+        self.assertEqual(result["count"].dropna().astype(int).tolist(), [1, 2, 3])
+        self.assertAlmostEqual(result["value"][0], 1.1)
+        self.assertEqual(result["label"].tolist(), ["a", "b", "c"])
+
+    def test_write_polars_dataframe_nulls(self):
+        """Exporting a Polars DataFrame with null values should preserve nulls."""
+        df = pl.DataFrame({
+            "ints": [1, None, 3],
+            "floats": [1.0, None, 3.0],
+            "strings": ["x", None, "z"],
+        })
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = f"{tempdir}/output.sbdf"
+            sbdf.export_data(df, path)
+            result = sbdf.import_data(path)
+        self.assertTrue(pd.isnull(result["ints"][1]))
+        self.assertTrue(pd.isnull(result["floats"][1]))
+        self.assertTrue(pd.isnull(result["strings"][1]))
+
+    def test_write_polars_series(self):
+        """Exporting a Polars Series should produce a valid SBDF file."""
+        series = pl.Series("vals", [10, 20, 30])
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = f"{tempdir}/output.sbdf"
+            sbdf.export_data(series, path)
+            result = sbdf.import_data(path)
+        self.assertEqual(len(result), 3)
+        self.assertEqual(result.columns[0], "vals")
+        self.assertEqual(result["vals"].dropna().astype(int).tolist(), [10, 20, 30])
+
+    def test_import_as_polars(self):
+        """Importing an SBDF file with output_format='polars' should return a Polars DataFrame."""
+        dataframe = sbdf.import_data(utils.get_test_data_file("sbdf/1.sbdf"), output_format="polars")
+        self.assertIsInstance(dataframe, pl.DataFrame)
+        self.assertIn("Boolean", dataframe.columns)
+        self.assertIn("Integer", dataframe.columns)
+
+    def test_polars_roundtrip(self):
+        """A Polars DataFrame should survive an export/import roundtrip."""
+        original = pl.DataFrame({
+            "integers": [1, 2, 3],
+            "floats": [1.5, 2.5, 3.5],
+            "strings": ["foo", "bar", "baz"],
+        })
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = f"{tempdir}/roundtrip.sbdf"
+            sbdf.export_data(original, path)
+            result = sbdf.import_data(path, output_format="polars")
+        self.assertIsInstance(result, pl.DataFrame)
+        self.assertEqual(result["strings"].to_list(), ["foo", "bar", "baz"])
+        self.assertAlmostEqual(result["floats"][0], 1.5)

@@ -55,6 +55,11 @@ try:
 except ImportError:
     PIL = None
 
+try:
+    import polars as pl
+except ImportError:
+    pl = None
+
 
 # Various utility helper functions for doing things that are problematic in PYX files
 include "sbdf_helpers.pxi"
@@ -654,10 +659,11 @@ cdef dict _import_metadata(sbdf_c.sbdf_metadata_head* md, int column_num):
     return metadata
 
 
-def import_data(sbdf_file):
-    """Import data from an SBDF file and create a 'pandas' DataFrame.
+def import_data(sbdf_file, output_format="pandas"):
+    """Import data from an SBDF file and create a DataFrame.
 
     :param sbdf_file: the filename of the SBDF file to import
+    :param output_format: the format of the returned DataFrame; either 'pandas' (default) or 'polars'
     :return: the DataFrame containing the imported data
     :raises SBDFError: if a problem is encountered during import
     """
@@ -812,6 +818,10 @@ def import_data(sbdf_file):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             dataframe.spotfire_table_metadata = table_metadata
+        if output_format == "polars":
+            if pl is None:
+                raise SBDFError("polars is not installed; install it with 'pip install spotfire[polars]'")
+            return pl.from_pandas(dataframe)
         return dataframe
 
     finally:
@@ -1028,6 +1038,110 @@ cdef _export_obj_series(obj, default_column_name):
         column_metadata = {}
 
     return {}, [column_name], [column_metadata], [context]
+
+
+cdef int _export_infer_valuetype_from_polars_dtype(dtype, series_description):
+    """Determine a value type for a data set based on the Polars dtype for the series.
+
+    :param dtype: the Polars dtype object
+    :param series_description: description of series (for error reporting)
+    :return: the integer value type id representing the type of series
+    :raise SBDFError: if the dtype is unknown
+    """
+    dtype_name = dtype.__class__.__name__
+    if dtype_name == "Boolean":
+        return sbdf_c.SBDF_BOOLTYPEID
+    elif dtype_name in ("Int8", "Int16", "Int32", "UInt8", "UInt16"):
+        return sbdf_c.SBDF_INTTYPEID
+    elif dtype_name in ("Int64", "UInt32", "UInt64"):
+        return sbdf_c.SBDF_LONGTYPEID
+    elif dtype_name == "Float32":
+        return sbdf_c.SBDF_FLOATTYPEID
+    elif dtype_name == "Float64":
+        return sbdf_c.SBDF_DOUBLETYPEID
+    elif dtype_name in ("Utf8", "String"):
+        return sbdf_c.SBDF_STRINGTYPEID
+    elif dtype_name == "Date":
+        return sbdf_c.SBDF_DATETYPEID
+    elif dtype_name == "Datetime":
+        return sbdf_c.SBDF_DATETIMETYPEID
+    elif dtype_name == "Duration":
+        return sbdf_c.SBDF_TIMESPANTYPEID
+    elif dtype_name == "Time":
+        return sbdf_c.SBDF_TIMETYPEID
+    elif dtype_name == "Binary":
+        return sbdf_c.SBDF_BINARYTYPEID
+    elif dtype_name == "Decimal":
+        return sbdf_c.SBDF_DECIMALTYPEID
+    elif dtype_name == "Categorical":
+        return _export_infer_valuetype_from_polars_dtype(dtype.categories, series_description)
+    else:
+        raise SBDFError(f"unknown Polars dtype '{dtype_name}' in {series_description}")
+
+
+cdef np_c.ndarray _export_polars_series_to_numpy(_ExportContext context, series):
+    """Convert a Polars Series to a NumPy array suitable for the SBDF exporter.
+
+    :param context: export context holding the resolved value type
+    :param series: Polars Series to convert
+    :return: NumPy ndarray of values
+    """
+    dtype_name = series.dtype.__class__.__name__
+    if dtype_name in ("Date", "Time"):
+        # The Date/Time exporters require Python date/time objects;
+        # Polars .to_numpy() returns numpy datetime64/int64 which those exporters do not accept.
+        return np.asarray(series.to_list(), dtype=object)
+    na_value = context.get_numpy_na_value()
+    if na_value is not None:
+        return np.asarray(series.fill_null(na_value).to_numpy(allow_copy=True),
+                          dtype=context.get_numpy_dtype())
+    else:
+        return np.asarray(series.to_numpy(allow_copy=True), dtype=object)
+
+
+cdef _export_obj_polars_dataframe(obj):
+    """Extract column information for a Polars ``DataFrame``.
+
+    :param obj: Polars DataFrame object to export
+    :return: tuple containing dictionary of table metadata, list of column names, list of dictionaries of column
+              metadata, and list of export context objects
+    """
+    if len(set(obj.columns)) != len(obj.columns):
+        raise SBDFError("obj does not have unique column names")
+
+    column_names = []
+    column_metadata = []
+    exporter_contexts = []
+    for col in obj.columns:
+        series = obj[col]
+        column_names.append(col)
+        context = _ExportContext()
+        context.set_valuetype_id(_export_infer_valuetype_from_polars_dtype(series.dtype, f"column '{col}'"))
+        invalids = series.is_null().to_numpy()
+        context.set_arrays(_export_polars_series_to_numpy(context, series), invalids)
+        column_metadata.append({})
+        exporter_contexts.append(context)
+
+    return {}, column_names, column_metadata, exporter_contexts
+
+
+cdef _export_obj_polars_series(obj, default_column_name):
+    """Extract column information for a Polars ``Series``.
+
+    :param obj: Polars Series object to export
+    :param default_column_name: column name to use when obj does not have a name
+    :return: tuple containing dict of table metadata, list of column names, list of dicts of column metadata, and
+              list of export context objects
+    """
+    column_name = obj.name if obj.name else default_column_name
+    description = f"series '{obj.name}'" if obj.name else "series"
+
+    context = _ExportContext()
+    context.set_valuetype_id(_export_infer_valuetype_from_polars_dtype(obj.dtype, description))
+    invalids = obj.is_null().to_numpy()
+    context.set_arrays(_export_polars_series_to_numpy(context, obj), invalids)
+
+    return {}, [column_name], [{}], [context]
 
 
 cdef _export_obj_numpy(np_c.ndarray obj, default_column_name):
@@ -1801,8 +1915,14 @@ def export_data(obj, sbdf_file, default_column_name="x", Py_ssize_t rows_per_sli
 
     try:
         # Extract data and metadata from obj
+        # Polars DataFrames (tabular)
+        if pl is not None and isinstance(obj, pl.DataFrame):
+            exported = _export_obj_polars_dataframe(obj)
+        # Polars Series (columnar)
+        elif pl is not None and isinstance(obj, pl.Series):
+            exported = _export_obj_polars_series(obj, default_column_name)
         # Pandas DataFrames (tabular)
-        if isinstance(obj, pd.DataFrame):
+        elif isinstance(obj, pd.DataFrame):
             exported = _export_obj_dataframe(obj)
         # Pandas Series (columnar)
         elif isinstance(obj, pd.Series):
