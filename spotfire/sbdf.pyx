@@ -425,6 +425,13 @@ cdef class _ImportContext:
         """
         return _valuetype_id_to_spotfire_typename(self.value_type.id)
 
+    cpdef bint is_object_numpy_type(self):
+        """Return True if the numpy type for this column is NPY_OBJECT.
+
+        :return: True if the numpy type is object, False otherwise
+        """
+        return self.numpy_type_num == np_c.NPY_OBJECT
+
 
 # Individual functions for importing each value type.
 ctypedef int(*importer_fn)(_ImportContext, sbdf_c.sbdf_columnslice*)
@@ -659,6 +666,74 @@ cdef dict _import_metadata(sbdf_c.sbdf_metadata_head* md, int column_num):
     return metadata
 
 
+cdef object _import_polars_dtype(_ImportContext context):
+    """Return the Polars dtype corresponding to the SBDF value type in the import context.
+
+    :param context: import context for a column
+    :return: the Polars dtype object
+    """
+    vt_id = context.value_type.id
+    if vt_id == sbdf_c.SBDF_BOOLTYPEID:
+        return pl.Boolean
+    elif vt_id == sbdf_c.SBDF_INTTYPEID:
+        return pl.Int32
+    elif vt_id == sbdf_c.SBDF_LONGTYPEID:
+        return pl.Int64
+    elif vt_id == sbdf_c.SBDF_FLOATTYPEID:
+        return pl.Float32
+    elif vt_id == sbdf_c.SBDF_DOUBLETYPEID:
+        return pl.Float64
+    elif vt_id == sbdf_c.SBDF_STRINGTYPEID:
+        return pl.Utf8
+    elif vt_id == sbdf_c.SBDF_DATETIMETYPEID:
+        return pl.Datetime
+    elif vt_id == sbdf_c.SBDF_DATETYPEID:
+        return pl.Date
+    elif vt_id == sbdf_c.SBDF_TIMETYPEID:
+        return pl.Time
+    elif vt_id == sbdf_c.SBDF_TIMESPANTYPEID:
+        return pl.Duration
+    elif vt_id == sbdf_c.SBDF_BINARYTYPEID:
+        return pl.Binary
+    elif vt_id == sbdf_c.SBDF_DECIMALTYPEID:
+        return pl.Decimal
+    else:
+        return pl.Utf8
+
+
+cdef object _import_build_polars_dataframe(column_names, importer_contexts):
+    """Build a Polars DataFrame directly from import context data, with no Pandas intermediary.
+
+    :param column_names: list of column name strings
+    :param importer_contexts: list of _ImportContext objects
+    :return: a Polars DataFrame
+    """
+    series_list = []
+    for i, name in enumerate(column_names):
+        context = importer_contexts[i]
+        values = context.get_values_array()
+        invalids = context.get_invalid_array()
+        polars_dtype = _import_polars_dtype(context)
+
+        if context.is_object_numpy_type():
+            # Object arrays hold Python objects (str, date, datetime, etc.); Polars cannot
+            # construct a typed series from a numpy object array directly — use a Python list.
+            values_list = values.tolist()
+            if invalids.any():
+                for idx in np.where(invalids)[0]:
+                    values_list[idx] = None
+            col = pl.Series(name=name, values=values_list, dtype=polars_dtype)
+        else:
+            # Numeric arrays: numpy → Polars Series directly, then scatter nulls if needed.
+            col = pl.Series(name=name, values=values, dtype=polars_dtype)
+            if invalids.any():
+                col = col.scatter(np.where(invalids)[0].tolist(), None)
+
+        series_list.append(col)
+
+    return pl.DataFrame(series_list)
+
+
 def import_data(sbdf_file, output_format="pandas"):
     """Import data from an SBDF file and create a DataFrame.
 
@@ -780,7 +855,13 @@ def import_data(sbdf_file, output_format="pandas"):
         if error != sbdf_c.SBDF_OK and error != sbdf_c.SBDF_TABLEEND:
             raise SBDFError(f"error reading '{sbdf_file}': {sbdf_c.sbdf_err_get_str(error).decode('utf-8')}")
 
-        # Build a new DataFrame with the results
+        # Build a Polars DataFrame directly if requested, with no Pandas intermediary
+        if output_format == "polars":
+            if pl is None:
+                raise SBDFError("polars is not installed; install it with 'pip install spotfire[polars]'")
+            return _import_build_polars_dataframe(column_names, importer_contexts)
+
+        # Build a new Pandas DataFrame with the results
         imported_columns = []
         for i in range(num_columns):
             column_series = pd.Series(importer_contexts[i].get_values_array(),
@@ -818,10 +899,6 @@ def import_data(sbdf_file, output_format="pandas"):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             dataframe.spotfire_table_metadata = table_metadata
-        if output_format == "polars":
-            if pl is None:
-                raise SBDFError("polars is not installed; install it with 'pip install spotfire[polars]'")
-            return pl.from_pandas(dataframe)
         return dataframe
 
     finally:

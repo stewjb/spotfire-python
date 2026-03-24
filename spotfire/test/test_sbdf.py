@@ -22,7 +22,7 @@ import spotfire
 try:
     import polars as pl
 except ImportError:
-    pl = None
+    pl = None  # type: ignore[assignment]
 from spotfire import sbdf
 from spotfire.test import utils
 
@@ -550,9 +550,9 @@ class SbdfTest(unittest.TestCase):
 class SbdfPolarsTest(unittest.TestCase):
     """Unit tests for Polars DataFrame support in 'spotfire.sbdf' module."""
 
-    def test_write_polars_dataframe_basic(self):
+    def test_write_polars_basic(self):
         """Exporting a Polars DataFrame with common types should produce a valid SBDF file."""
-        df = pl.DataFrame({
+        polars_df = pl.DataFrame({
             "flag": [True, False, True],
             "count": [1, 2, 3],
             "value": [1.1, 2.2, 3.3],
@@ -560,7 +560,7 @@ class SbdfPolarsTest(unittest.TestCase):
         })
         with tempfile.TemporaryDirectory() as tempdir:
             path = f"{tempdir}/output.sbdf"
-            sbdf.export_data(df, path)
+            sbdf.export_data(polars_df, path)
             result = sbdf.import_data(path)
         self.assertEqual(len(result), 3)
         self.assertEqual(list(result.columns), ["flag", "count", "value", "label"])
@@ -569,16 +569,16 @@ class SbdfPolarsTest(unittest.TestCase):
         self.assertAlmostEqual(result["value"][0], 1.1)
         self.assertEqual(result["label"].tolist(), ["a", "b", "c"])
 
-    def test_write_polars_dataframe_nulls(self):
+    def test_write_polars_nulls(self):
         """Exporting a Polars DataFrame with null values should preserve nulls."""
-        df = pl.DataFrame({
+        polars_df = pl.DataFrame({
             "ints": [1, None, 3],
             "floats": [1.0, None, 3.0],
             "strings": ["x", None, "z"],
         })
         with tempfile.TemporaryDirectory() as tempdir:
             path = f"{tempdir}/output.sbdf"
-            sbdf.export_data(df, path)
+            sbdf.export_data(polars_df, path)
             result = sbdf.import_data(path)
         self.assertTrue(pd.isnull(result["ints"][1]))
         self.assertTrue(pd.isnull(result["floats"][1]))
@@ -596,11 +596,14 @@ class SbdfPolarsTest(unittest.TestCase):
         self.assertEqual(result["vals"].dropna().astype(int).tolist(), [10, 20, 30])
 
     def test_import_as_polars(self):
-        """Importing an SBDF file with output_format='polars' should return a Polars DataFrame."""
+        """Importing an SBDF file with output_format='polars' should return a native Polars DataFrame."""
         dataframe = sbdf.import_data(utils.get_test_data_file("sbdf/1.sbdf"), output_format="polars")
         self.assertIsInstance(dataframe, pl.DataFrame)
+        self.assertNotIsInstance(dataframe, pd.DataFrame)
         self.assertIn("Boolean", dataframe.columns)
         self.assertIn("Integer", dataframe.columns)
+        # Verify nulls are preserved natively
+        self.assertIsNone(dataframe["Long"][0])
 
     def test_polars_roundtrip(self):
         """A Polars DataFrame should survive an export/import roundtrip."""
