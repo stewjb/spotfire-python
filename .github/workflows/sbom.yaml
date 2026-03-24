@@ -1,0 +1,242 @@
+name: Generate SBOM
+
+on:
+  # Runs after build.yaml completes successfully on main — no duplicate build
+  workflow_run:
+    workflows: ["Build and Test Package"]
+    types: [completed]
+    branches: [main]
+  # Always run on release so SBOMs are attached to published releases
+  release:
+    types: [published]
+  # Allow manual trigger for any branch
+  workflow_dispatch:
+
+permissions:
+  contents: write      # dependency-submission API + release asset upload
+  actions: read        # needed to download artifacts from the triggering workflow_run
+  id-token: write      # sigstore attestation
+
+# Shared values that appear in every SBOM's creationInfo / documentNamespace
+env:
+  TRIVY_VERSION: "0.69.3"
+  SBOM_ORG: "Cloud Software Group, Inc., Spotfire"
+  SBOM_NS_BASE: "https://spotfire.com/spdx"
+
+jobs:
+  # ── 1. Read config (no build) ───────────────────────────────────────────────
+  setup:
+    name: Read Config
+    if: >
+      github.event_name == 'release' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      python-versions: ${{ steps.dynamic.outputs.pythons }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read python-versions
+        id: dynamic
+        run: |
+          echo -n "pythons=" >> $GITHUB_OUTPUT
+          cat .github/python-versions.json >> $GITHUB_OUTPUT
+
+  # ── 2. SBOM for the sdist ──────────────────────────────────────────────────
+  sbom-sdist:
+    name: SBOM – Source Distribution
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive   # needed for vendor/sbdf-c when building/installing sdist
+
+      # workflow_run: reuse artifact from build.yaml — no rebuild
+      - name: Download sdist (from workflow_run)
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # push / release / workflow_dispatch: build fresh
+      - name: Set Up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Build sdist
+        if: github.event_name != 'workflow_run'
+        run: |
+          pip install build
+          python -m build --sdist
+
+      # Install the sdist into an isolated venv so we can freeze its dependencies
+      - name: Install sdist into scan-env
+        run: |
+          python -m venv scan-env
+          scan-env/bin/pip install --quiet dist/spotfire-*.tar.gz
+
+      - name: Set SBOM metadata
+        id: meta
+        run: |
+          PKG_NAME=$(ls dist/spotfire-*.tar.gz | sed 's|dist/||;s|\.tar\.gz||')
+          CREATED=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          echo "pkg_name=$PKG_NAME"                                    >> $GITHUB_OUTPUT
+          echo "namespace=${{ env.SBOM_NS_BASE }}/$PKG_NAME/$CREATED" >> $GITHUB_OUTPUT
+
+      - name: Install Trivy ${{ env.TRIVY_VERSION }}
+        run: |
+          curl -sSfL https://github.com/aquasecurity/trivy/releases/download/v${{ env.TRIVY_VERSION }}/trivy_${{ env.TRIVY_VERSION }}_Linux-64bit.tar.gz \
+            | tar -xz trivy
+          sudo mv trivy /usr/local/bin/trivy
+
+      # Freeze installed packages into requirements.txt then scan for licenses
+      # This avoids Trivy picking up test eggs / synthetic filesystem packages
+      - name: Trivy scan → raw SPDX JSON
+        run: |
+          scan-env/bin/pip freeze > requirements.txt
+          trivy fs \
+            --scanners license \
+            --license-full \
+            --format spdx-json \
+            --output _trivy_raw.spdx.json \
+            --quiet \
+            requirements.txt
+          rm requirements.txt
+
+      - name: Patch SBOM metadata and strip annotations
+        run: |
+          python .github/scripts/patch_sbom.py \
+            --input  _trivy_raw.spdx.json \
+            --output spotfire-sdist.sbom.spdx.json \
+            --namespace "${{ steps.meta.outputs.namespace }}" \
+            --name     "${{ steps.meta.outputs.pkg_name }}" \
+            --org      "${{ env.SBOM_ORG }}" \
+            --tool     "trivy-${{ env.TRIVY_VERSION }}"
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-sdist
+          path: spotfire-sdist.sbom.spdx.json
+
+  # ── 3. SBOM for each wheel ─────────────────────────────────────────────────
+  sbom-wheel:
+    name: SBOM – Wheel (${{ matrix.python-version }})
+    needs: setup
+    runs-on: ubuntu-latest       # Linux only — Windows wheels cannot be cross-compiled
+    strategy:
+      matrix:
+        python-version: ${{ fromJson(needs.setup.outputs.python-versions) }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive   # needed for vendor/sbdf-c when building wheel fresh
+
+      # workflow_run: reuse the ubuntu wheel artifact from build.yaml — no rebuild
+      - name: Download wheel (from workflow_run)
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@v4
+        with:
+          name: wheel-${{ matrix.python-version }}-ubuntu-latest
+          path: dist
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # push / release / workflow_dispatch: build fresh on Linux
+      - name: Set Up Python
+        if: github.event_name != 'workflow_run'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Build wheel
+        if: github.event_name != 'workflow_run'
+        run: |
+          git submodule update --init --recursive
+          pip install auditwheel build setuptools
+          python -m build --sdist
+          tar xzf dist/spotfire-*.tar.gz
+          cd spotfire-*
+          python -m build --wheel
+          auditwheel repair -w ../dist --plat manylinux2014_x86_64 dist/*.whl
+
+      # Install wheel into isolated venv so we can freeze its dependencies
+      - name: Install wheel into scan-env
+        run: |
+          python -m venv scan-env
+          scan-env/bin/pip install --quiet dist/spotfire-*.whl
+
+      - name: Set SBOM metadata
+        id: meta
+        run: |
+          PKG_NAME=$(ls dist/spotfire-*.whl | sed 's|dist/||;s|\.whl||' | cut -d- -f1,2)
+          CREATED=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          echo "pkg_name=$PKG_NAME"                                    >> $GITHUB_OUTPUT
+          echo "namespace=${{ env.SBOM_NS_BASE }}/$PKG_NAME/$CREATED" >> $GITHUB_OUTPUT
+
+      - name: Install Trivy ${{ env.TRIVY_VERSION }}
+        run: |
+          curl -sSfL https://github.com/aquasecurity/trivy/releases/download/v${{ env.TRIVY_VERSION }}/trivy_${{ env.TRIVY_VERSION }}_Linux-64bit.tar.gz \
+            | tar -xz trivy
+          sudo mv trivy /usr/local/bin/trivy
+
+      # Freeze installed packages into requirements.txt then scan for licenses
+      # This avoids Trivy picking up test eggs / synthetic filesystem packages
+      - name: Trivy scan → raw SPDX JSON
+        run: |
+          scan-env/bin/pip freeze > requirements.txt
+          trivy fs \
+            --scanners license \
+            --license-full \
+            --format spdx-json \
+            --output _trivy_raw.spdx.json \
+            --quiet \
+            requirements.txt
+          rm requirements.txt
+
+      - name: Patch SBOM metadata and strip annotations
+        run: |
+          python .github/scripts/patch_sbom.py \
+            --input  _trivy_raw.spdx.json \
+            --output spotfire-wheel-${{ matrix.python-version }}.sbom.spdx.json \
+            --namespace "${{ steps.meta.outputs.namespace }}" \
+            --name     "${{ steps.meta.outputs.pkg_name }}" \
+            --org      "${{ env.SBOM_ORG }}" \
+            --tool     "trivy-${{ env.TRIVY_VERSION }}"
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-wheel-${{ matrix.python-version }}
+          path: spotfire-wheel-${{ matrix.python-version }}.sbom.spdx.json
+
+  # ── 4. Attach SBOMs to GitHub Release ──────────────────────────────────────
+  attach-to-release:
+    name: Attach SBOMs to Release
+    if: github.event_name == 'release'
+    needs: [sbom-sdist, sbom-wheel]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all SBOM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sbom-*
+          path: all-sboms
+          merge-multiple: true
+
+      - name: List SBOMs
+        run: find all-sboms -name "*.spdx.json" | sort
+
+      # gh CLI is pre-installed on all GitHub-hosted runners — no third-party action needed
+      - name: Upload SBOMs to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            $(find all-sboms -name "*.spdx.json" | tr '\n' ' ') \
+            --repo "${{ github.repository }}" \
+            --clobber
