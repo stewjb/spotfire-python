@@ -877,10 +877,19 @@ def import_data(sbdf_file, output_format="pandas"):
         # Build a new Pandas DataFrame with the results
         imported_columns = []
         for i in range(num_columns):
-            column_series = pd.Series(importer_contexts[i].get_values_array(),
-                                      dtype=importer_contexts[i].get_pandas_dtype_name(),
-                                      name=column_names[i])
-            column_series.loc[importer_contexts[i].get_invalid_array()] = None
+            values = importer_contexts[i].get_values_array()
+            invalid_array = importer_contexts[i].get_invalid_array()
+            dtype_name = importer_contexts[i].get_pandas_dtype_name()
+            if dtype_name in ("Int32", "Int64"):
+                # Build nullable integer array with mask in one shot; avoids a second-pass
+                # .loc assignment that triggers Pandas dtype coercion overhead.
+                base_dtype = "int32" if dtype_name == "Int32" else "int64"
+                column_series = pd.Series(
+                    pd.arrays.IntegerArray(values.astype(base_dtype), invalid_array),
+                    name=column_names[i])
+            else:
+                column_series = pd.Series(values, dtype=dtype_name, name=column_names[i])
+                column_series.loc[invalid_array] = None
             imported_columns.append(column_series)
         dataframe = pd.concat(imported_columns, axis=1)
         for i in range(num_columns):
