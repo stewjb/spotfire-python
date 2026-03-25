@@ -1310,7 +1310,7 @@ cdef _export_obj_dict_of_lists(dict obj):
         context = _ExportContext()
         context.set_valuetype_id(_export_infer_valuetype_from_type(obj[col], f"column '{col}'"))
         shape = len(obj[col])
-        values = np.array(shape, dtype=context.get_numpy_dtype())
+        values = np.empty(shape, dtype=context.get_numpy_dtype())
         for i in range(shape):
             if pd.isnull(obj[col][i]):
                 values[i] = context.get_numpy_na_value()
@@ -1355,16 +1355,17 @@ cdef _export_obj_iterable(obj, default_column_name):
 
     context = _ExportContext()
     context.set_valuetype_id(_export_infer_valuetype_from_type(obj, "list"))
-    values = np.empty(0, dtype=context.get_numpy_dtype())
-    invalids = np.empty(0, dtype="bool")
+    values_list = []
+    invalids_list = []
     for x in obj:
         if pd.isnull(x):
-            values = np.append(values, context.get_numpy_na_value())
-            invalids = np.append(invalids, True)
+            values_list.append(context.get_numpy_na_value())
+            invalids_list.append(True)
         else:
-            values = np.append(values, x)
-            invalids = np.append(invalids, False)
-    context.set_arrays(values, invalids)
+            values_list.append(x)
+            invalids_list.append(False)
+    context.set_arrays(np.array(values_list, dtype=context.get_numpy_dtype()),
+                       np.array(invalids_list, dtype="bool"))
 
     return {}, [default_column_name], [{}], [context]
 

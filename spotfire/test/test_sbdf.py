@@ -509,6 +509,22 @@ class SbdfTest(unittest.TestCase):
         else:
             self.fail(f"Expected PNG bytes, got {type(val)}: {val!r}")
 
+    def test_export_dict_of_lists(self):
+        """Exporting a dict of lists should produce a valid SBDF file."""
+        data = {"ints": [1, 2, 3], "floats": [1.1, 2.2, 3.3], "strings": ["a", "b", "c"]}
+        result = self._roundtrip_dataframe(data)
+        self.assertEqual(len(result), 3)
+        self.assertEqual(result["ints"].dropna().astype(int).tolist(), [1, 2, 3])
+        self.assertAlmostEqual(result["floats"][0], 1.1)
+        self.assertEqual(result["strings"].tolist(), ["a", "b", "c"])
+
+    def test_export_list(self):
+        """Exporting a plain Python list should produce a single-column SBDF file."""
+        result = self._roundtrip_dataframe([10, 20, 30])
+        self.assertEqual(len(result), 3)
+        self.assertEqual(result.columns[0], "x")
+        self.assertEqual(result["x"].dropna().astype(int).tolist(), [10, 20, 30])
+
     def test_export_import_unicode_path(self):
         """Test export and import with a Unicode file path."""
         dataframe = pd.DataFrame({"col": [1, 2, 3], "txt": ["a", "b", "c"]})
