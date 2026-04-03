@@ -549,6 +549,7 @@ class SbdfTest(unittest.TestCase):
 @unittest.skipIf(pl is None, "polars not installed")
 class SbdfPolarsTest(unittest.TestCase):
     """Unit tests for Polars DataFrame support in 'spotfire.sbdf' module."""
+    # pylint: disable=too-many-public-methods
 
     def test_write_polars_basic(self):
         """Exporting a Polars DataFrame with common types should produce a valid SBDF file."""
@@ -709,6 +710,42 @@ class SbdfPolarsTest(unittest.TestCase):
         self.assertAlmostEqual(result["vals"][0], 1.0)
         self.assertTrue(pd.isnull(result["vals"][1]))
         self.assertAlmostEqual(result["vals"][2], 3.0)
+
+    # Date conversion correctness test
+
+    def test_date_view_equals_astype(self):
+        """The in-place epoch-shift + view conversion used in _import_build_polars_dataframe
+        should produce the same datetime64[D] values as the reference astype() path for a
+        range of dates spanning the SBDF epoch, dates before the Unix epoch, the Unix epoch
+        itself, a recent date, and the maximum representable date."""
+        sbdf_epoch_ms = 62135596800000  # ms from datetime(1,1,1) to datetime(1970,1,1)
+        test_dates = [
+            datetime.date(1, 1, 1),      # SBDF epoch — largest negative offset from Unix
+            datetime.date(1969, 12, 31), # one day before Unix epoch
+            datetime.date(1970, 1, 1),   # Unix epoch — must give day 0
+            datetime.date(1970, 1, 2),   # one day after Unix epoch
+            datetime.date(2024, 1, 15),  # arbitrary recent date
+            datetime.date(9999, 12, 31), # maximum Python date
+        ]
+        for test_date in test_dates:
+            # Reproduce the raw SBDF int64 value exactly as the C importer would produce it.
+            sbdf_ms = int(
+                (test_date - datetime.date(1, 1, 1)) / datetime.timedelta(milliseconds=1)
+            )
+            arr = np.array([sbdf_ms], dtype=np.int64)
+
+            # Apply the same in-place conversion used in _import_build_polars_dataframe.
+            arr -= sbdf_epoch_ms
+            arr //= 86400000
+            view_result = arr.view('datetime64[D]')[0]
+
+            # Reference: convert the Python date directly via astype.
+            ref_result = np.array([test_date], dtype=object).astype('datetime64[D]')[0]
+
+            self.assertEqual(
+                view_result, ref_result,
+                msg=f"Mismatch for {test_date}: view={view_result}, astype={ref_result}"
+            )
 
     # Metadata warning tests
 
