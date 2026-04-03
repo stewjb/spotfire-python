@@ -517,6 +517,31 @@ cdef int _import_vt_date(_ImportContext context, sbdf_c.sbdf_columnslice* col_sl
     return error
 
 
+cdef int _import_vt_date_int32(_ImportContext context, sbdf_c.sbdf_columnslice* col_slice):
+    """Import a date column slice as int32 days since Unix epoch (Polars path only).
+
+    Converts the raw SBDF int64 millisecond values to int32 days at the C level, writing
+    directly into an NPY_INT32 slice.  This avoids an intermediate int64 array and the
+    subsequent astype(np.int32) copy, reducing total allocations from C data to one.
+
+    SBDF dates are always stored at midnight (exact multiples of 86400000 ms), so C
+    integer division equals Python floor division for both positive and negative offsets.
+    """
+    cdef int error
+    (error, values, invalid) = context.get_values_and_invalid(col_slice)
+    cdef long long* data
+    cdef int i
+    if error == sbdf_c.SBDF_OK:
+        values_slice = context.new_slice_from_empty(values.count)
+        data = <long long*>values.data
+        for i in range(values.count):
+            values_slice[i] = <int>((data[i] - _SBDF_TO_UNIX_EPOCH_MS) / 86400000)
+        invalid_slice = context.new_slice_from_invalid(values.count, invalid)
+        context.append_values_slice(values_slice, invalid_slice)
+        context.cleanup_values_and_invalid(values, invalid)
+    return error
+
+
 cdef int _import_vt_time(_ImportContext context, sbdf_c.sbdf_columnslice* col_slice):
     """Import a column slice consisting of time values."""
     cdef int error
@@ -766,15 +791,11 @@ cdef object _import_build_polars_dataframe(column_names, importer_contexts):
                 col = col.scatter(np.where(invalids)[0].tolist(), None)
 
         elif vt_id == sbdf_c.SBDF_DATETYPEID:
-            # Same raw int64 ms path; divide down to days, then narrow to int32.
-            # pl.Date is stored as int32 days since Unix epoch in Arrow, so the int64→int32
-            # narrowing is unavoidable (1 copy).  pl.Series(int32, pl.Date) is then
-            # zero-copy: 2 copies total from C data.
+            # _import_vt_date_int32 already converted ms→days and wrote int32 directly.
+            # pl.Series(int32, pl.Date) is zero-copy: 1 copy total from C data.
             values = context.get_values_array()
             context.clear_values_arrays()
-            values -= _SBDF_TO_UNIX_EPOCH_MS
-            values //= 86400000
-            col = pl.Series(name=name, values=values.astype(np.int32), dtype=pl.Date)
+            col = pl.Series(name=name, values=values, dtype=pl.Date)
             if invalids.any():
                 col = col.scatter(np.where(invalids)[0].tolist(), None)
 
@@ -897,8 +918,8 @@ def import_data(sbdf_file, output_format="pandas"):
                     importer_fns[i] = _import_vt_datetime
             elif col_type.id == sbdf_c.SBDF_DATETYPEID:
                 if output_format == "polars":
-                    importer_contexts.append(_ImportContext(np_c.NPY_INT64, col_type))
-                    importer_fns[i] = _import_vts_numpy
+                    importer_contexts.append(_ImportContext(np_c.NPY_INT32, col_type))
+                    importer_fns[i] = _import_vt_date_int32
                 else:
                     importer_contexts.append(_ImportContext(np_c.NPY_OBJECT, col_type))
                     importer_fns[i] = _import_vt_date
