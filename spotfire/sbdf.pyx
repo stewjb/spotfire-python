@@ -83,6 +83,17 @@ class SBDFWarning(Warning):
     """A warning that is raised to indicate an issue during import or export of SBDF files."""
 
 
+import enum
+
+class OutputFormat(str, enum.Enum):
+    """Supported output formats for :func:`import_data`.
+
+    Using this enum is preferred over passing raw strings, though both are accepted.
+    """
+    PANDAS = "pandas"
+    POLARS = "polars"
+
+
 # Utility functions and definitions for managing data types
 cdef extern from *:
     """
@@ -542,6 +553,28 @@ cdef int _import_vt_date_int32(_ImportContext context, sbdf_c.sbdf_columnslice* 
     return error
 
 
+cdef int _import_vt_time_int64(_ImportContext context, sbdf_c.sbdf_columnslice* col_slice):
+    """Import a time column slice as int64 ns since midnight (Polars path only).
+
+    SBDF Time values are stored as int64 milliseconds since midnight.  Polars Time is
+    stored as int64 nanoseconds since midnight internally in Arrow, so each value is
+    multiplied by 1,000,000.  pl.Series(int64, pl.Time) then wraps the buffer zero-copy.
+    """
+    cdef int error
+    (error, values, invalid) = context.get_values_and_invalid(col_slice)
+    cdef long long* data
+    cdef Py_ssize_t i
+    if error == sbdf_c.SBDF_OK:
+        values_slice = context.new_slice_from_empty(values.count)
+        data = <long long*>values.data
+        for i in range(values.count):
+            values_slice[i] = data[i] * 1000000
+        invalid_slice = context.new_slice_from_invalid(values.count, invalid)
+        context.append_values_slice(values_slice, invalid_slice)
+        context.cleanup_values_and_invalid(values, invalid)
+    return error
+
+
 cdef int _import_vt_time(_ImportContext context, sbdf_c.sbdf_columnslice* col_slice):
     """Import a column slice consisting of time values."""
     cdef int error
@@ -808,6 +841,21 @@ cdef object _import_build_polars_dataframe(column_names, importer_contexts):
             if invalids.any():
                 col = col.scatter(np.where(invalids)[0].tolist(), None)
 
+        elif vt_id == sbdf_c.SBDF_TIMETYPEID:
+            # _import_vt_time_int64 stores int64 ns since midnight (Polars Time internal format).
+            # pl.Series(int64, pl.Time) validates every element, including null positions.
+            # SBDF null slots may contain sentinel values (e.g. INT64_MAX) which, after the
+            # ×1_000_000 ms→ns scale, exceed the valid Time range [0, 86_400_000_000_000 ns].
+            # Zero them out before constructing the Series so validation passes; the invalids
+            # array then overwrites those slots with None immediately after.
+            values = context.get_values_array()
+            context.clear_values_arrays()
+            if invalids.any():
+                values[invalids] = 0
+            col = pl.Series(name=name, values=values, dtype=pl.Time)
+            if invalids.any():
+                col = col.scatter(np.where(invalids)[0].tolist(), None)
+
         elif not context.is_object_numpy_type():
             # Numeric types (bool, int, float): numpy → Polars directly; Polars may zero-copy
             # the buffer.  No early release needed — these arrays are small relative to the data.
@@ -933,8 +981,12 @@ def import_data(sbdf_file, output_format="pandas"):
                     importer_contexts.append(_ImportContext(np_c.NPY_OBJECT, col_type))
                     importer_fns[i] = _import_vt_timespan
             elif col_type.id == sbdf_c.SBDF_TIMETYPEID:
-                importer_contexts.append(_ImportContext(np_c.NPY_OBJECT, col_type))
-                importer_fns[i] = _import_vt_time
+                if output_format == "polars":
+                    importer_contexts.append(_ImportContext(np_c.NPY_INT64, col_type))
+                    importer_fns[i] = _import_vt_time_int64
+                else:
+                    importer_contexts.append(_ImportContext(np_c.NPY_OBJECT, col_type))
+                    importer_fns[i] = _import_vt_time
             elif col_type.id == sbdf_c.SBDF_STRINGTYPEID:
                 importer_contexts.append(_ImportContext(np_c.NPY_OBJECT, col_type))
                 importer_fns[i] = _import_vt_string
@@ -1033,6 +1085,14 @@ def import_data(sbdf_file, output_format="pandas"):
         if importer_fns != NULL:
             mem.PyMem_RawFree(importer_fns)
 
+
+# Polars-specific exporter IDs stored in _ExportContext.polars_exporter_id.
+# Using C-level constants avoids Python object lookup in the hot export loop.
+cdef int _POL_EXP_DEFAULT = 0
+cdef int _POL_EXP_DATETIME = 1
+cdef int _POL_EXP_DATE = 2
+cdef int _POL_EXP_TIMESPAN = 3
+cdef int _POL_EXP_TIME = 4
 
 # Export data to SBDF from Python.
 @cython.auto_pickle(False)
@@ -1343,7 +1403,10 @@ cdef np_c.ndarray _export_polars_series_to_numpy(_ExportContext context, series,
             try:
                 return np.asarray(series.to_numpy(allow_copy=False),
                                   dtype=context.get_numpy_dtype())
-            except Exception:
+            except (pl.exceptions.InvalidOperationError, RuntimeError):
+            # Polars raises InvalidOperationError (older versions) or RuntimeError (1.x+) when
+            # allow_copy=False cannot be honoured (e.g., series contains nulls).  Both are caught
+            # so the fallback copy path works across Polars versions.
                 return np.asarray(series.to_numpy(allow_copy=True),
                                   dtype=context.get_numpy_dtype())
     else:
@@ -1623,7 +1686,10 @@ cdef np_c.ndarray _polars_temporal_to_numpy(series):
     """
     try:
         return series.to_numpy(allow_copy=False)
-    except Exception:
+    except (pl.exceptions.InvalidOperationError, RuntimeError):
+            # Polars raises InvalidOperationError (older versions) or RuntimeError (1.x+) when
+            # allow_copy=False cannot be honoured (e.g., series contains nulls).  Both are caught
+            # so the fallback copy path works across Polars versions.
         return series.to_numpy(allow_copy=True)
 
 
@@ -1648,22 +1714,22 @@ cdef void _export_polars_setup_arrays(_ExportContext context, series):
         else:
             raw = series.cast(pl.Int64)
         context.set_arrays(_polars_temporal_to_numpy(raw), invalids)
-        context.polars_exporter_id = 1
+        context.polars_exporter_id = _POL_EXP_DATETIME
     elif dtype_name == "Duration":
         if getattr(series.dtype, 'time_unit', 'ms') != 'ms':
             raw = series.cast(pl.Duration('ms')).cast(pl.Int64)
         else:
             raw = series.cast(pl.Int64)
         context.set_arrays(_polars_temporal_to_numpy(raw), invalids)
-        context.polars_exporter_id = 3
+        context.polars_exporter_id = _POL_EXP_TIMESPAN
     elif dtype_name == "Date":
         # Date is always int32 days since Unix epoch in Arrow.
         context.set_arrays(_polars_temporal_to_numpy(series.cast(pl.Int32)), invalids)
-        context.polars_exporter_id = 2
+        context.polars_exporter_id = _POL_EXP_DATE
     elif dtype_name == "Time":
         # Time is always int64 ns since midnight in Arrow.
         context.set_arrays(_polars_temporal_to_numpy(series.cast(pl.Int64)), invalids)
-        context.polars_exporter_id = 4
+        context.polars_exporter_id = _POL_EXP_TIME
     else:
         context.set_arrays(_export_polars_series_to_numpy(context, series, invalids), invalids)
 
@@ -2396,13 +2462,13 @@ def export_data(obj, sbdf_file, default_column_name="x", Py_ssize_t rows_per_sli
                 values = NULL
                 context = exporter_contexts[i]
                 pol_id = context.get_polars_exporter_id()
-                if pol_id == 1:
+                if pol_id == _POL_EXP_DATETIME:
                     exporter = _export_vt_polars_datetime
-                elif pol_id == 2:
+                elif pol_id == _POL_EXP_DATE:
                     exporter = _export_vt_polars_date
-                elif pol_id == 3:
+                elif pol_id == _POL_EXP_TIMESPAN:
                     exporter = _export_vt_polars_timespan
-                elif pol_id == 4:
+                elif pol_id == _POL_EXP_TIME:
                     exporter = _export_vt_polars_time
                 else:
                     exporter = _export_get_exporter(context.get_valuetype_id())
