@@ -24,7 +24,8 @@ simply `spotfire`) to include the required Python packages to support optional f
 | `spotfire[dev,lint]`        | Internal development                         |
 
 Once installed, `export_data()` accepts `polars.DataFrame` and `polars.Series` directly, and
-`import_data()` can return a `polars.DataFrame` via `output_format="polars"`.
+`import_data()` can return a `polars.DataFrame` by passing `output_format=spotfire.OutputFormat.POLARS`
+(or the equivalent string `"polars"` for backwards compatibility).
 
 > **Note for Spotfire data functions:** Spotfire's bundled Python interpreter does not include
 > Polars. To use Polars inside a data function, configure Spotfire to use a custom Python
