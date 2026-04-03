@@ -597,8 +597,8 @@ class SbdfPolarsTest(unittest.TestCase):
         self.assertEqual(result["vals"].dropna().astype(int).tolist(), [10, 20, 30])
 
     def test_import_as_polars(self):
-        """Importing an SBDF file with output_format='polars' should return a native Polars DataFrame."""
-        dataframe = sbdf.import_data(utils.get_test_data_file("sbdf/1.sbdf"), output_format="polars")
+        """Importing an SBDF file with output_format=OutputFormat.POLARS should return a native Polars DataFrame."""
+        dataframe = sbdf.import_data(utils.get_test_data_file("sbdf/1.sbdf"), output_format=sbdf.OutputFormat.POLARS)
         self.assertIsInstance(dataframe, pl.DataFrame)
         self.assertNotIsInstance(dataframe, pd.DataFrame)
         self.assertIn("Boolean", dataframe.columns)
@@ -643,7 +643,7 @@ class SbdfPolarsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             path = f"{tempdir}/roundtrip.sbdf"
             sbdf.export_data(original, path)
-            result = sbdf.import_data(path, output_format="polars")
+            result = sbdf.import_data(path, output_format=sbdf.OutputFormat.POLARS)
         self.assertIsInstance(result, pl.DataFrame)
         self.assertEqual(result["strings"].to_list(), ["foo", "bar", "baz"])
         self.assertAlmostEqual(result["floats"][0], 1.5)
@@ -750,9 +750,9 @@ class SbdfPolarsTest(unittest.TestCase):
     # Metadata warning tests
 
     def test_polars_import_meta_warning(self):
-        """import_data with output_format='polars' should warn that metadata is not preserved."""
+        """import_data with output_format=OutputFormat.POLARS should warn that metadata is not preserved."""
         with self.assertWarnsRegex(sbdf.SBDFWarning, "metadata"):
-            sbdf.import_data(utils.get_test_data_file("sbdf/1.sbdf"), output_format="polars")
+            sbdf.import_data(utils.get_test_data_file("sbdf/1.sbdf"), output_format=sbdf.OutputFormat.POLARS)
 
     def test_polars_df_export_meta_warn(self):
         """export_data with a Polars DataFrame should warn that metadata is not preserved."""

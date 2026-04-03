@@ -32,8 +32,6 @@ import spotfire.sbdf as sbdf
 df = sbdf.import_data("data.sbdf", output_format=sbdf.OutputFormat.POLARS)
 ```
 
-The string `"polars"` is accepted as well for backwards compatibility.
-
 > **Note for Spotfire data functions:** Spotfire's bundled Python interpreter does not include
 > Polars. To use Polars inside a data function, configure Spotfire to use a custom Python
 > environment that has `polars` installed. Polars is a large binary package (~44 MB), so

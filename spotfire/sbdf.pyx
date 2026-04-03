@@ -85,11 +85,8 @@ class SBDFWarning(Warning):
 
 import enum
 
-class OutputFormat(str, enum.Enum):
-    """Supported output formats for :func:`import_data`.
-
-    Using this enum is preferred over passing raw strings, though both are accepted.
-    """
+class OutputFormat(enum.Enum):
+    """Supported output formats for :func:`import_data`."""
     PANDAS = "pandas"
     POLARS = "polars"
 
@@ -882,17 +879,17 @@ cdef object _import_build_polars_dataframe(column_names, importer_contexts):
     return pl.DataFrame(series_list)
 
 
-def import_data(sbdf_file, output_format="pandas"):
+def import_data(sbdf_file, output_format=OutputFormat.PANDAS):
     """Import data from an SBDF file and create a DataFrame.
 
     :param sbdf_file: the filename of the SBDF file to import
-    :param output_format: the format of the returned DataFrame; either 'pandas' (default) or 'polars'
+    :param output_format: the format of the returned DataFrame; an :class:`OutputFormat` member
     :return: the DataFrame containing the imported data
     :raises SBDFError: if a problem is encountered during import
     """
     # Validate output_format before opening the file so we fail fast on bad input.
-    if output_format not in ("pandas", "polars"):
-        raise SBDFError(f"unknown output_format {output_format!r}; expected 'pandas' or 'polars'")
+    if not isinstance(output_format, OutputFormat):
+        raise SBDFError(f"unknown output_format {output_format!r}; expected an OutputFormat enum member")
 
     cdef int error, i
     cdef stdio.FILE* input_file = NULL
@@ -956,7 +953,7 @@ def import_data(sbdf_file, output_format="pandas"):
                 importer_contexts.append(_ImportContext(np_c.NPY_INT32, col_type))
                 importer_fns[i] = _import_vts_numpy
             elif col_type.id == sbdf_c.SBDF_DATETIMETYPEID:
-                if output_format == "polars":
+                if output_format == OutputFormat.POLARS:
                     # Store raw int64 ms values; _import_build_polars_dataframe will adjust the
                     # epoch offset and reinterpret as datetime64[ms] without boxing Python objects.
                     importer_contexts.append(_ImportContext(np_c.NPY_INT64, col_type))
@@ -965,14 +962,14 @@ def import_data(sbdf_file, output_format="pandas"):
                     importer_contexts.append(_ImportContext(np_c.NPY_OBJECT, col_type))
                     importer_fns[i] = _import_vt_datetime
             elif col_type.id == sbdf_c.SBDF_DATETYPEID:
-                if output_format == "polars":
+                if output_format == OutputFormat.POLARS:
                     importer_contexts.append(_ImportContext(np_c.NPY_INT32, col_type))
                     importer_fns[i] = _import_vt_date_int32
                 else:
                     importer_contexts.append(_ImportContext(np_c.NPY_OBJECT, col_type))
                     importer_fns[i] = _import_vt_date
             elif col_type.id == sbdf_c.SBDF_TIMESPANTYPEID:
-                if output_format == "polars":
+                if output_format == OutputFormat.POLARS:
                     # Timespans are stored as int64 ms with no epoch — reinterpret directly as
                     # timedelta64[ms] in _import_build_polars_dataframe.
                     importer_contexts.append(_ImportContext(np_c.NPY_INT64, col_type))
@@ -981,7 +978,7 @@ def import_data(sbdf_file, output_format="pandas"):
                     importer_contexts.append(_ImportContext(np_c.NPY_OBJECT, col_type))
                     importer_fns[i] = _import_vt_timespan
             elif col_type.id == sbdf_c.SBDF_TIMETYPEID:
-                if output_format == "polars":
+                if output_format == OutputFormat.POLARS:
                     importer_contexts.append(_ImportContext(np_c.NPY_INT64, col_type))
                     importer_fns[i] = _import_vt_time_int64
                 else:
@@ -1031,7 +1028,7 @@ def import_data(sbdf_file, output_format="pandas"):
         # This keeps the import zero-copy for large DataFrames: numpy arrays collected
         # by each _ImportContext go straight into Polars Series without ever becoming
         # a Pandas DataFrame.
-        if output_format == "polars":
+        if output_format == OutputFormat.POLARS:
             if pl is None:
                 raise SBDFError("polars is not installed; install it with 'pip install spotfire[polars]'")
             return _import_build_polars_dataframe(column_names, importer_contexts)
