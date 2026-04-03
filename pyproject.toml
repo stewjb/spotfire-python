@@ -287,5 +287,6 @@ plugins = ["numpy.typing.mypy_plugin"]
 module = [
     "geopandas",
     "HtmlTestRunner",
+    "polars",
 ]
 ignore_missing_imports = true
