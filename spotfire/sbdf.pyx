@@ -754,32 +754,36 @@ cdef object _import_build_polars_dataframe(column_names, importer_contexts):
         vt_id = context.get_value_type_id()
 
         if vt_id == sbdf_c.SBDF_DATETIMETYPEID:
-            # Raw int64 ms since SBDF epoch → subtract fixed offset → reinterpret as
-            # datetime64[ms].  All arithmetic is in-place on the concatenated array, so
-            # peak memory is: one int64 numpy array + the Polars Arrow buffer (2 copies,
-            # or 1 if Polars references the numpy buffer directly).
+            # Raw int64 ms since SBDF epoch → subtract fixed offset → Int64 Series →
+            # cast to Datetime('ms').  Polars' cast between Int64 and Datetime('ms') is a
+            # zero-copy metadata operation (both are int64 internally in Arrow), so the
+            # Series shares the same buffer as the numpy array: 1 copy total from C data.
             values = context.get_values_array()
             context.clear_values_arrays()
             values -= _SBDF_TO_UNIX_EPOCH_MS
-            col = pl.Series(name=name, values=values.view('datetime64[ms]'), dtype=pl.Datetime('ms'))
+            col = pl.Series(name=name, values=values, dtype=pl.Int64).cast(pl.Datetime('ms'))
             if invalids.any():
                 col = col.scatter(np.where(invalids)[0].tolist(), None)
 
         elif vt_id == sbdf_c.SBDF_DATETYPEID:
-            # Same raw int64 ms path; divide down to days for pl.Date.
+            # Same raw int64 ms path; divide down to days, then narrow to int32.
+            # pl.Date is stored as int32 days since Unix epoch in Arrow, so the int64→int32
+            # narrowing is unavoidable (1 copy).  pl.Series(int32, pl.Date) is then
+            # zero-copy: 2 copies total from C data.
             values = context.get_values_array()
             context.clear_values_arrays()
             values -= _SBDF_TO_UNIX_EPOCH_MS
             values //= 86400000
-            col = pl.Series(name=name, values=values.view('datetime64[D]'), dtype=pl.Date)
+            col = pl.Series(name=name, values=values.astype(np.int32), dtype=pl.Date)
             if invalids.any():
                 col = col.scatter(np.where(invalids)[0].tolist(), None)
 
         elif vt_id == sbdf_c.SBDF_TIMESPANTYPEID:
-            # Timespans are already int64 ms with no epoch bias — reinterpret directly.
+            # Timespans are int64 ms with no epoch bias.  Duration('ms') is int64 in Arrow,
+            # so the cast is zero-copy: 1 copy total from C data.
             values = context.get_values_array()
             context.clear_values_arrays()
-            col = pl.Series(name=name, values=values.view('timedelta64[ms]'), dtype=pl.Duration('ms'))
+            col = pl.Series(name=name, values=values, dtype=pl.Int64).cast(pl.Duration('ms'))
             if invalids.any():
                 col = col.scatter(np.where(invalids)[0].tolist(), None)
 
