@@ -709,3 +709,46 @@ class SbdfPolarsTest(unittest.TestCase):
         self.assertAlmostEqual(result["vals"][0], 1.0)
         self.assertTrue(pd.isnull(result["vals"][1]))
         self.assertAlmostEqual(result["vals"][2], 3.0)
+
+    # Metadata warning tests
+
+    def test_polars_import_meta_warning(self):
+        """import_data with output_format='polars' should warn that metadata is not preserved."""
+        with self.assertWarnsRegex(sbdf.SBDFWarning, "metadata"):
+            sbdf.import_data(utils.get_test_data_file("sbdf/1.sbdf"), output_format="polars")
+
+    def test_polars_df_export_meta_warn(self):
+        """export_data with a Polars DataFrame should warn that metadata is not preserved."""
+        polars_df = pl.DataFrame({"x": [1, 2, 3]})
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = f"{tempdir}/meta_warn.sbdf"
+            with self.assertWarnsRegex(sbdf.SBDFWarning, "metadata"):
+                sbdf.export_data(polars_df, path)
+
+    def test_polars_series_meta_export(self):
+        """export_data with a Polars Series should warn that metadata is not preserved."""
+        series = pl.Series("x", [1, 2, 3])
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = f"{tempdir}/meta_warn_series.sbdf"
+            with self.assertWarnsRegex(sbdf.SBDFWarning, "metadata"):
+                sbdf.export_data(series, path)
+
+    # Metadata public-API error tests
+
+    def test_copy_metadata_polars_error(self):
+        """copy_metadata should raise TypeError with a Polars-specific message."""
+        polars_df = pl.DataFrame({"x": [1, 2, 3]})
+        with self.assertRaisesRegex(TypeError, "Polars"):
+            spotfire.copy_metadata(polars_df, polars_df)
+
+    def test_get_types_polars_error(self):
+        """get_spotfire_types should raise TypeError with a Polars-specific message."""
+        polars_df = pl.DataFrame({"x": [1, 2, 3]})
+        with self.assertRaisesRegex(TypeError, "Polars"):
+            spotfire.get_spotfire_types(polars_df)
+
+    def test_set_types_polars_error(self):
+        """set_spotfire_types should raise TypeError with a Polars-specific message."""
+        polars_df = pl.DataFrame({"x": [1, 2, 3]})
+        with self.assertRaisesRegex(TypeError, "Polars"):
+            spotfire.set_spotfire_types(polars_df, {"x": "Integer"})

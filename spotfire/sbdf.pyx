@@ -110,6 +110,13 @@ cdef object _timedelta_from_msec(long long msec):
 cdef object _DATETIME_EPOCH = datetime.datetime(1, 1, 1)
 cdef object _TIMEDELTA_ONE_MSEC = _timedelta_from_msec(1)
 
+# Milliseconds between the SBDF epoch (datetime(1, 1, 1)) and the Unix epoch (datetime(1970, 1, 1)).
+# = 719162 days * 86400 s/day * 1000 ms/s, derived from:
+#   (datetime.datetime(1970, 1, 1) - datetime.datetime(1, 1, 1)).total_seconds() * 1000
+# Used in the Polars import path to convert raw SBDF int64 ms values to Unix-based int64 ms values
+# without boxing through Python datetime objects.
+cdef long long _SBDF_TO_UNIX_EPOCH_MS = 62135596800000
+
 
 cdef extern from *:
     """
@@ -437,6 +444,28 @@ cdef class _ImportContext:
         """
         return self.numpy_type_num == np_c.NPY_OBJECT
 
+    cpdef int get_value_type_id(self):
+        """Return the SBDF value type ID for this column.
+
+        :return: the integer SBDF value type ID
+
+        .. note:: ``value_type`` is a ``cdef`` C struct attribute inaccessible from Python.  This
+                  ``cpdef`` wrapper lets :func:`_import_build_polars_dataframe` dispatch on type
+                  without a Cython-level cast.
+        """
+        return self.value_type.id
+
+    cpdef void clear_values_arrays(self):
+        """Release the internal per-slice values arrays to allow early garbage collection.
+
+        Call this after :meth:`get_values_array` has produced the concatenated result and the
+        caller no longer needs the per-slice data.  Dropping these references makes the underlying
+        NPY_OBJECT (or NPY_INT64) slice arrays eligible for GC before the Polars Arrow buffer is
+        allocated, reducing peak memory from three live copies to two (or one, for types where
+        Polars can reference the numpy buffer directly).
+        """
+        self.values_arrays = []
+
 
 # Individual functions for importing each value type.
 ctypedef int(*importer_fn)(_ImportContext, sbdf_c.sbdf_columnslice*)
@@ -713,27 +742,67 @@ cdef object _import_build_polars_dataframe(column_names, importer_contexts):
     :param importer_contexts: list of _ImportContext objects
     :return: a Polars DataFrame
     """
+    warnings.warn(
+        "Polars DataFrames do not support Spotfire metadata; table and column metadata are not "
+        "preserved. See https://github.com/pola-rs/polars/issues/5117",
+        SBDFWarning
+    )
     series_list = []
     for i, name in enumerate(column_names):
         context = importer_contexts[i]
-        values = context.get_values_array()
         invalids = context.get_invalid_array()
-        polars_dtype = _import_polars_dtype(context)
+        vt_id = context.get_value_type_id()
 
-        if context.is_object_numpy_type():
-            # Object arrays hold Python objects (str, date, datetime, etc.); Polars cannot
-            # construct a typed series from a numpy object array directly — use a Python list.
+        if vt_id == sbdf_c.SBDF_DATETIMETYPEID:
+            # Raw int64 ms since SBDF epoch → subtract fixed offset → reinterpret as
+            # datetime64[ms].  All arithmetic is in-place on the concatenated array, so
+            # peak memory is: one int64 numpy array + the Polars Arrow buffer (2 copies,
+            # or 1 if Polars references the numpy buffer directly).
+            values = context.get_values_array()
+            context.clear_values_arrays()
+            values -= _SBDF_TO_UNIX_EPOCH_MS
+            col = pl.Series(name=name, values=values.view('datetime64[ms]'), dtype=pl.Datetime('ms'))
+            if invalids.any():
+                col = col.scatter(np.where(invalids)[0].tolist(), None)
+
+        elif vt_id == sbdf_c.SBDF_DATETYPEID:
+            # Same raw int64 ms path; divide down to days for pl.Date.
+            values = context.get_values_array()
+            context.clear_values_arrays()
+            values -= _SBDF_TO_UNIX_EPOCH_MS
+            values //= 86400000
+            col = pl.Series(name=name, values=values.view('datetime64[D]'), dtype=pl.Date)
+            if invalids.any():
+                col = col.scatter(np.where(invalids)[0].tolist(), None)
+
+        elif vt_id == sbdf_c.SBDF_TIMESPANTYPEID:
+            # Timespans are already int64 ms with no epoch bias — reinterpret directly.
+            values = context.get_values_array()
+            context.clear_values_arrays()
+            col = pl.Series(name=name, values=values.view('timedelta64[ms]'), dtype=pl.Duration('ms'))
+            if invalids.any():
+                col = col.scatter(np.where(invalids)[0].tolist(), None)
+
+        elif not context.is_object_numpy_type():
+            # Numeric types (bool, int, float): numpy → Polars directly; Polars may zero-copy
+            # the buffer.  No early release needed — these arrays are small relative to the data.
+            values = context.get_values_array()
+            col = pl.Series(name=name, values=values, dtype=_import_polars_dtype(context))
+            if invalids.any():
+                col = col.scatter(np.where(invalids)[0].tolist(), None)
+
+        else:
+            # String, time, binary, decimal: Polars requires a Python list (no compatible numpy
+            # dtype).  Release the concatenated array before building the Arrow buffer to cap
+            # peak memory at 2 live copies (list + Arrow) instead of 3.
+            values = context.get_values_array()
             values_list = values.tolist()
+            context.clear_values_arrays()
+            del values
             if invalids.any():
                 for idx in np.where(invalids)[0]:
                     values_list[idx] = None
-            col = pl.Series(name=name, values=values_list, dtype=polars_dtype)
-        else:
-            # Numeric arrays: numpy → Polars Series directly, then scatter nulls if needed.
-            col = pl.Series(name=name, values=values, dtype=polars_dtype)
-            if invalids.any():
-                indices = np.where(invalids)[0].tolist()
-                col = col.scatter(indices, None)
+            col = pl.Series(name=name, values=values_list, dtype=_import_polars_dtype(context))
 
         series_list.append(col)
 
@@ -814,14 +883,30 @@ def import_data(sbdf_file, output_format="pandas"):
                 importer_contexts.append(_ImportContext(np_c.NPY_INT32, col_type))
                 importer_fns[i] = _import_vts_numpy
             elif col_type.id == sbdf_c.SBDF_DATETIMETYPEID:
-                importer_contexts.append(_ImportContext(np_c.NPY_OBJECT, col_type))
-                importer_fns[i] = _import_vt_datetime
+                if output_format == "polars":
+                    # Store raw int64 ms values; _import_build_polars_dataframe will adjust the
+                    # epoch offset and reinterpret as datetime64[ms] without boxing Python objects.
+                    importer_contexts.append(_ImportContext(np_c.NPY_INT64, col_type))
+                    importer_fns[i] = _import_vts_numpy
+                else:
+                    importer_contexts.append(_ImportContext(np_c.NPY_OBJECT, col_type))
+                    importer_fns[i] = _import_vt_datetime
             elif col_type.id == sbdf_c.SBDF_DATETYPEID:
-                importer_contexts.append(_ImportContext(np_c.NPY_OBJECT, col_type))
-                importer_fns[i] = _import_vt_date
+                if output_format == "polars":
+                    importer_contexts.append(_ImportContext(np_c.NPY_INT64, col_type))
+                    importer_fns[i] = _import_vts_numpy
+                else:
+                    importer_contexts.append(_ImportContext(np_c.NPY_OBJECT, col_type))
+                    importer_fns[i] = _import_vt_date
             elif col_type.id == sbdf_c.SBDF_TIMESPANTYPEID:
-                importer_contexts.append(_ImportContext(np_c.NPY_OBJECT, col_type))
-                importer_fns[i] = _import_vt_timespan
+                if output_format == "polars":
+                    # Timespans are stored as int64 ms with no epoch — reinterpret directly as
+                    # timedelta64[ms] in _import_build_polars_dataframe.
+                    importer_contexts.append(_ImportContext(np_c.NPY_INT64, col_type))
+                    importer_fns[i] = _import_vts_numpy
+                else:
+                    importer_contexts.append(_ImportContext(np_c.NPY_OBJECT, col_type))
+                    importer_fns[i] = _import_vt_timespan
             elif col_type.id == sbdf_c.SBDF_TIMETYPEID:
                 importer_contexts.append(_ImportContext(np_c.NPY_OBJECT, col_type))
                 importer_fns[i] = _import_vt_time
@@ -1229,6 +1314,11 @@ cdef _export_obj_polars_dataframe(obj):
     :return: tuple containing dictionary of table metadata, list of column names, list of dictionaries of column
               metadata, and list of export context objects
     """
+    warnings.warn(
+        "Polars DataFrames do not support Spotfire metadata; the exported SBDF will not contain "
+        "table or column metadata. See https://github.com/pola-rs/polars/issues/5117",
+        SBDFWarning
+    )
     if len(set(obj.columns)) != len(obj.columns):
         raise SBDFError("obj does not have unique column names")
 
@@ -1259,6 +1349,11 @@ cdef _export_obj_polars_series(obj, default_column_name):
     :return: tuple containing dict of table metadata, list of column names, list of dicts of column metadata, and
               list of export context objects
     """
+    warnings.warn(
+        "Polars DataFrames do not support Spotfire metadata; the exported SBDF will not contain "
+        "table or column metadata. See https://github.com/pola-rs/polars/issues/5117",
+        SBDFWarning
+    )
     column_name = obj.name if obj.name else default_column_name
     description = f"series '{obj.name}'" if obj.name else "series"
 
