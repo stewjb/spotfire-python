@@ -1042,6 +1042,7 @@ cdef class _ExportContext:
     cdef np_c.ndarray values_array
     cdef np_c.ndarray invalid_array
     cdef bint any_invalid
+    cdef int polars_exporter_id  # 0=default; 1=datetime; 2=date; 3=timespan; 4=time
 
     def __init__(self):
         """Initialize the export context."""
@@ -1049,6 +1050,7 @@ cdef class _ExportContext:
         self.values_array = None
         self.invalid_array = None
         self.any_invalid = False
+        self.polars_exporter_id = 0
 
     cdef void set_arrays(self, np_c.ndarray values, invalid):
         """Set the NumPy ``ndarray`` with the values to export and a list or NumPy ``ndarray`` of whether each value
@@ -1080,6 +1082,13 @@ cdef class _ExportContext:
         :return: the integer value type ID
         """
         return self.valuetype_id
+
+    cpdef int get_polars_exporter_id(self):
+        """Get the Polars-specific exporter ID (0 = use default exporter).
+
+        :return: 0 default; 1 datetime; 2 date; 3 timespan; 4 time
+        """
+        return self.polars_exporter_id
 
     def get_numpy_dtype(self):
         """Get the correct NumPy dtype for this column.
@@ -1299,11 +1308,16 @@ cdef int _export_infer_valuetype_from_polars_dtype(dtype, series_description):
         raise SBDFError(f"unknown Polars dtype '{dtype_name}' in {series_description}")
 
 
-cdef np_c.ndarray _export_polars_series_to_numpy(_ExportContext context, series):
-    """Convert a Polars Series to a NumPy array suitable for the SBDF exporter.
+cdef np_c.ndarray _export_polars_series_to_numpy(_ExportContext context, series,
+                                                  np_c.ndarray invalids):
+    """Convert a non-temporal Polars Series to a NumPy array for the SBDF exporter.
+
+    Temporal types (Datetime, Date, Duration, Time) are handled by
+    ``_export_polars_setup_arrays`` before this function is reached.
 
     :param context: export context holding the resolved value type
-    :param series: Polars Series to convert
+    :param series: Polars Series to convert (non-temporal)
+    :param invalids: boolean NumPy array marking which rows are null/NaN
     :return: NumPy ndarray of values
     """
     dtype_name = series.dtype.__class__.__name__
@@ -1316,18 +1330,22 @@ cdef np_c.ndarray _export_polars_series_to_numpy(_ExportContext context, series)
         # Cast to String so .to_numpy() returns plain Python strings
         series = series.cast(pl.Utf8)
         dtype_name = "Utf8"
-    if dtype_name in ("Date", "Time"):
-        # The Date/Time exporters require Python date/time objects;
-        # Polars .to_numpy() returns numpy datetime64/int64 which those exporters do not accept.
-        return np.asarray(series.to_list(), dtype=object)
-    if dtype_name in ("Datetime", "Duration"):
-        # Keep native datetime64/timedelta64 arrays; the invalids mask handles nulls (NaT cells
-        # are marked invalid and ignored by the SBDF writer).  Boxing to object would be slower.
-        return series.to_numpy(allow_copy=True)
     na_value = context.get_numpy_na_value()
     if na_value is not None:
-        return np.asarray(series.fill_null(na_value).to_numpy(allow_copy=True),
-                          dtype=context.get_numpy_dtype())
+        # Numeric / boolean column.  Skip fill_null when the series is null-free:
+        # to_numpy(allow_copy=False) returns a zero-copy view of the Arrow buffer.
+        # Fall back to fill_null+copy when nulls are present (Arrow's validity bitmap
+        # cannot be expressed inline in a numpy array for integer/boolean dtypes).
+        if invalids.any():
+            return np.asarray(series.fill_null(na_value).to_numpy(allow_copy=True),
+                              dtype=context.get_numpy_dtype())
+        else:
+            try:
+                return np.asarray(series.to_numpy(allow_copy=False),
+                                  dtype=context.get_numpy_dtype())
+            except Exception:
+                return np.asarray(series.to_numpy(allow_copy=True),
+                                  dtype=context.get_numpy_dtype())
     else:
         return np.asarray(series.to_numpy(allow_copy=True), dtype=object)
 
@@ -1355,11 +1373,7 @@ cdef _export_obj_polars_dataframe(obj):
         column_names.append(col)
         context = _ExportContext()
         context.set_valuetype_id(_export_infer_valuetype_from_polars_dtype(series.dtype, f"column '{col}'"))
-        if series.dtype.__class__.__name__ in ("Float32", "Float64"):
-            invalids = (series.is_null() | series.is_nan()).to_numpy()
-        else:
-            invalids = series.is_null().to_numpy()
-        context.set_arrays(_export_polars_series_to_numpy(context, series), invalids)
+        _export_polars_setup_arrays(context, series)
         column_metadata.append({})
         exporter_contexts.append(context)
 
@@ -1384,11 +1398,7 @@ cdef _export_obj_polars_series(obj, default_column_name):
 
     context = _ExportContext()
     context.set_valuetype_id(_export_infer_valuetype_from_polars_dtype(obj.dtype, description))
-    if obj.dtype.__class__.__name__ in ("Float32", "Float64"):
-        invalids = (obj.is_null() | obj.is_nan()).to_numpy()
-    else:
-        invalids = obj.is_null().to_numpy()
-    context.set_arrays(_export_polars_series_to_numpy(context, obj), invalids)
+    _export_polars_setup_arrays(context, obj)
 
     return {}, [column_name], [{}], [context]
 
@@ -1600,6 +1610,130 @@ cdef exporter_fn _export_get_exporter(int valuetype_id):
         return _export_vt_binary
     elif valuetype_id == sbdf_c.SBDF_DECIMALTYPEID:
         return _export_vt_decimal
+
+
+cdef np_c.ndarray _polars_temporal_to_numpy(series):
+    """Return a raw-integer NumPy array from a Polars integer Series, zero-copy when possible.
+
+    ``series`` must already be cast to the target integer type (Int32 or Int64).
+    Zero-copy succeeds for null-free series; falls back to a fill-zero copy when nulls
+    are present (Polars cannot expose the Arrow validity bitmap inline in a numpy view
+    for integer types).  The zeroed values at null positions are never read by Spotfire
+    because the SBDF invalids array marks those rows as missing.
+    """
+    try:
+        return series.to_numpy(allow_copy=False)
+    except Exception:
+        return series.to_numpy(allow_copy=True)
+
+
+cdef void _export_polars_setup_arrays(_ExportContext context, series):
+    """Populate context arrays and polars_exporter_id for a Polars Series.
+
+    For temporal types, extracts raw integer buffers (zero-copy when the series has no
+    nulls) and selects a dedicated C-level exporter that performs the epoch / unit
+    conversion without boxing Python objects.  For all other types, delegates to
+    ``_export_polars_series_to_numpy``.
+    """
+    dtype_name = series.dtype.__class__.__name__
+    if dtype_name in ("Float32", "Float64"):
+        invalids = (series.is_null() | series.is_nan()).to_numpy()
+    else:
+        invalids = series.is_null().to_numpy()
+
+    if dtype_name == "Datetime":
+        # Normalise to ms precision for SBDF; cast Datetime('ms')→Int64 is zero-copy.
+        if getattr(series.dtype, 'time_unit', 'ms') != 'ms':
+            raw = series.cast(pl.Datetime('ms')).cast(pl.Int64)
+        else:
+            raw = series.cast(pl.Int64)
+        context.set_arrays(_polars_temporal_to_numpy(raw), invalids)
+        context.polars_exporter_id = 1
+    elif dtype_name == "Duration":
+        if getattr(series.dtype, 'time_unit', 'ms') != 'ms':
+            raw = series.cast(pl.Duration('ms')).cast(pl.Int64)
+        else:
+            raw = series.cast(pl.Int64)
+        context.set_arrays(_polars_temporal_to_numpy(raw), invalids)
+        context.polars_exporter_id = 3
+    elif dtype_name == "Date":
+        # Date is always int32 days since Unix epoch in Arrow.
+        context.set_arrays(_polars_temporal_to_numpy(series.cast(pl.Int32)), invalids)
+        context.polars_exporter_id = 2
+    elif dtype_name == "Time":
+        # Time is always int64 ns since midnight in Arrow.
+        context.set_arrays(_polars_temporal_to_numpy(series.cast(pl.Int64)), invalids)
+        context.polars_exporter_id = 4
+    else:
+        context.set_arrays(_export_polars_series_to_numpy(context, series, invalids), invalids)
+
+
+cdef int _export_vt_polars_datetime(_ExportContext context, Py_ssize_t start, Py_ssize_t count,
+                                    sbdf_c.sbdf_object** obj):
+    """Export a Polars Datetime column.
+
+    ``values_array`` holds int64 ms since the Unix epoch.  Adds the fixed SBDF-to-Unix
+    offset in a tight C loop across all positions; null positions are zeroed in the
+    input by Polars and are ignored by Spotfire via the SBDF invalids array.
+    """
+    cdef np_c.npy_intp shape[1]
+    shape[0] = <np_c.npy_intp>count
+    cdef np_c.ndarray out = np_c.PyArray_ZEROS(1, shape, np_c.NPY_INT64, 0)
+    cdef long long* src = <long long*>np_c.PyArray_DATA(context.values_array)
+    cdef long long* dst = <long long*>np_c.PyArray_DATA(out)
+    cdef Py_ssize_t i
+    for i in range(count):
+        dst[i] = src[start + i] + _SBDF_TO_UNIX_EPOCH_MS
+    return sbdf_c.sbdf_obj_create_arr(sbdf_c.sbdf_vt_datetime(), <int>count, np_c.PyArray_DATA(out), NULL, obj)
+
+
+cdef int _export_vt_polars_date(_ExportContext context, Py_ssize_t start, Py_ssize_t count,
+                                sbdf_c.sbdf_object** obj):
+    """Export a Polars Date column.
+
+    ``values_array`` holds int32 days since the Unix epoch.  Converts each value to
+    int64 ms since the SBDF epoch in a tight C loop.
+    """
+    cdef np_c.npy_intp shape[1]
+    shape[0] = <np_c.npy_intp>count
+    cdef np_c.ndarray out = np_c.PyArray_ZEROS(1, shape, np_c.NPY_INT64, 0)
+    cdef int* src = <int*>np_c.PyArray_DATA(context.values_array)
+    cdef long long* dst = <long long*>np_c.PyArray_DATA(out)
+    cdef Py_ssize_t i
+    for i in range(count):
+        dst[i] = (<long long>src[start + i]) * 86400000 + _SBDF_TO_UNIX_EPOCH_MS
+    return sbdf_c.sbdf_obj_create_arr(sbdf_c.sbdf_vt_date(), <int>count, np_c.PyArray_DATA(out), NULL, obj)
+
+
+cdef int _export_vt_polars_timespan(_ExportContext context, Py_ssize_t start, Py_ssize_t count,
+                                    sbdf_c.sbdf_object** obj):
+    """Export a Polars Duration column.
+
+    ``values_array`` holds int64 ms.  SBDF TimeSpan is also int64 ms with no epoch
+    bias, so the Arrow buffer can be sliced and passed directly to the C writer without
+    any per-element loop.
+    """
+    return sbdf_c.sbdf_obj_create_arr(sbdf_c.sbdf_vt_timespan(), <int>count,
+                                      _export_get_offset_ptr(context.values_array, start, count),
+                                      NULL, obj)
+
+
+cdef int _export_vt_polars_time(_ExportContext context, Py_ssize_t start, Py_ssize_t count,
+                                sbdf_c.sbdf_object** obj):
+    """Export a Polars Time column.
+
+    ``values_array`` holds int64 ns since midnight (Polars / Arrow internal format).
+    Converts to int64 ms for SBDF in a tight C loop.
+    """
+    cdef np_c.npy_intp shape[1]
+    shape[0] = <np_c.npy_intp>count
+    cdef np_c.ndarray out = np_c.PyArray_ZEROS(1, shape, np_c.NPY_INT64, 0)
+    cdef long long* src = <long long*>np_c.PyArray_DATA(context.values_array)
+    cdef long long* dst = <long long*>np_c.PyArray_DATA(out)
+    cdef Py_ssize_t i
+    for i in range(count):
+        dst[i] = src[start + i] // 1000000
+    return sbdf_c.sbdf_obj_create_arr(sbdf_c.sbdf_vt_time(), <int>count, np_c.PyArray_DATA(out), NULL, obj)
 
 
 cdef int _export_vt_bool(_ExportContext context, Py_ssize_t start, Py_ssize_t count, sbdf_c.sbdf_object** obj):
@@ -2261,7 +2395,17 @@ def export_data(obj, sbdf_file, default_column_name="x", Py_ssize_t rows_per_sli
             for i in range(num_columns):
                 values = NULL
                 context = exporter_contexts[i]
-                exporter = _export_get_exporter(context.get_valuetype_id())
+                pol_id = context.get_polars_exporter_id()
+                if pol_id == 1:
+                    exporter = _export_vt_polars_datetime
+                elif pol_id == 2:
+                    exporter = _export_vt_polars_date
+                elif pol_id == 3:
+                    exporter = _export_vt_polars_timespan
+                elif pol_id == 4:
+                    exporter = _export_vt_polars_time
+                else:
+                    exporter = _export_get_exporter(context.get_valuetype_id())
                 error = exporter(context, row_offset, rows_per_slice, &values)
                 if error != sbdf_c.SBDF_OK:
                     raise SBDFError(f"error exporting column '{column_names[i]}': "
