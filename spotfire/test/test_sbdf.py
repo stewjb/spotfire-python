@@ -655,7 +655,7 @@ class SbdfPolarsTest(unittest.TestCase):
             path = f"{tempdir}/output.sbdf"
             sbdf.export_data(polars_df, path)
             with self.assertRaises(sbdf.SBDFError):
-                sbdf.import_data(path, output_format="numpy")
+                sbdf.import_data(path, output_format="numpy")  # type: ignore[call-overload]
 
     def test_write_polars_empty(self):
         """Exporting an empty Polars DataFrame should produce a valid (empty) SBDF file."""
