@@ -1066,7 +1066,7 @@ def import_data(sbdf_file, output_format=OutputFormat.PANDAS):
                 column_series = pd.Series(values, dtype=dtype_name, name=column_names[i])
                 column_series.loc[invalid_array] = None
             imported_columns.append(column_series)
-        dataframe = pd.concat(imported_columns, axis=1)
+        dataframe = pd.DataFrame(dict(zip(column_names, imported_columns)))
         for i in range(num_columns):
             dataframe[column_names[i]].spotfire_column_metadata = column_metadata[i]
             dataframe[column_names[i]].attrs['spotfire_type'] = importer_contexts[i].get_spotfire_type_name()
@@ -1151,7 +1151,7 @@ cdef class _ExportContext:
         """
         self.values_array = values
         self.invalid_array = np.asarray(invalid, dtype="bool")
-        self.any_invalid = any(invalid)
+        self.any_invalid = bool(self.invalid_array.any())
 
     cdef void set_arrow_string(self, np_c.ndarray offsets, np_c.ndarray data,
                                np_c.ndarray invalid):
@@ -1286,6 +1286,18 @@ cdef _export_obj_dataframe(obj):
                 # no epoch offset required — just copy so we can safely zero invalid positions.
                 raw = obj[col].to_numpy(dtype="timedelta64[ms]", na_value=np.timedelta64("NaT"))
                 values = raw.view(np.int64).copy()
+                if invalids.any():
+                    values[invalids] = 0
+                context.set_arrays(values, invalids)
+                context.values_precomputed_sbdf_int64 = True
+            elif context.valuetype_id == sbdf_c.SBDF_DATETYPEID and col_dtype == object:
+                # Pre-compute int64 SBDF-ms for date (object) columns: pd.to_datetime iterates
+                # in C rather than Python, then view('int64') * 86400000 + epoch offset gives
+                # the same zero-copy export path as datetime64.  Use day 0 (Unix epoch) as the
+                # na_value to keep null positions safe before zeroing them explicitly.
+                days = pd.to_datetime(obj[col], errors='coerce').to_numpy(
+                    dtype='datetime64[D]', na_value=np.datetime64(0, 'D'))
+                values = days.view(np.int64).copy() * 86400000 + _SBDF_TO_UNIX_EPOCH_MS
                 if invalids.any():
                     values[invalids] = 0
                 context.set_arrays(values, invalids)
@@ -2027,8 +2039,14 @@ cdef int _export_vt_date(_ExportContext context, Py_ssize_t start, Py_ssize_t co
     """Export a slice of data consisting of date values."""
     cdef np_c.npy_intp shape[1]
     shape[0] = <np_c.npy_intp> count
-    cdef np_c.ndarray new_values = np_c.PyArray_ZEROS(1, shape, np_c.NPY_INT64, 0)
+    cdef np_c.ndarray new_values
     cdef int i
+    if context.values_precomputed_sbdf_int64:
+        # Zero-copy path: values_array already holds int64 SBDF-ms (midnight) with invalids zeroed.
+        return sbdf_c.sbdf_obj_create_arr(sbdf_c.sbdf_vt_date(), <int>count,
+                                          _export_get_offset_ptr(context.values_array, start, count),
+                                          NULL, obj)
+    new_values = np_c.PyArray_ZEROS(1, shape, np_c.NPY_INT64, 0)
     for i in range(count):
         if not context.invalid_array[start + i]:
             val_i = context.values_array[start + i]
