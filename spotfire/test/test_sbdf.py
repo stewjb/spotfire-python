@@ -562,7 +562,8 @@ class SbdfTest(unittest.TestCase):
         for spotfire_type, dtype in [("DateTime", "datetime64[ms]"),
                                      ("TimeSpan", "timedelta64[ms]")]:
             with self.subTest(type=spotfire_type):
-                dataframe = pd.DataFrame({"x": pd.array([pd.NaT, pd.NaT, pd.NaT], dtype=dtype)})  # type: ignore[call-overload]
+                dataframe = pd.DataFrame({"x": pd.array([pd.NaT, pd.NaT, pd.NaT],  # type: ignore[call-overload]
+                                                         dtype=dtype)})
                 new_df = self._roundtrip_dataframe(dataframe)
                 self.assertEqual(len(new_df), 3)
                 self.assertTrue(new_df["x"].isna().all())
