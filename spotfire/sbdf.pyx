@@ -85,6 +85,7 @@ class SBDFWarning(Warning):
 
 import enum
 
+
 class OutputFormat(enum.Enum):
     """Supported output formats for :func:`import_data`."""
     PANDAS = "pandas"
@@ -1101,6 +1102,7 @@ cdef int _POL_EXP_TIMESPAN = 3
 cdef int _POL_EXP_TIME = 4
 cdef int _POL_EXP_STRING = 5
 
+
 # Export data to SBDF from Python.
 @cython.auto_pickle(False)
 cdef class _ExportContext:
@@ -1135,7 +1137,7 @@ cdef class _ExportContext:
         self.any_invalid = any(invalid)
 
     cdef void set_arrow_string(self, np_c.ndarray offsets, np_c.ndarray data,
-                                np_c.ndarray invalid):
+                               np_c.ndarray invalid):
         """Set Arrow buffer views for a Polars String/Utf8 column (bypasses values_array).
 
         :param offsets: int64 numpy view of the Arrow LargeUtf8 offsets buffer (length n+1)
@@ -1395,7 +1397,7 @@ cdef int _export_infer_valuetype_from_polars_dtype(dtype, series_description):
 
 
 cdef np_c.ndarray _export_polars_series_to_numpy(_ExportContext context, series,
-                                                  np_c.ndarray invalids):
+                                                 np_c.ndarray invalids):
     """Convert a non-temporal Polars Series to a NumPy array for the SBDF exporter.
 
     Temporal types (Datetime, Date, Duration, Time) are handled by
@@ -1430,9 +1432,9 @@ cdef np_c.ndarray _export_polars_series_to_numpy(_ExportContext context, series,
                 return np.asarray(series.to_numpy(allow_copy=False),
                                   dtype=context.get_numpy_dtype())
             except (pl.exceptions.InvalidOperationError, RuntimeError):
-            # Polars raises InvalidOperationError (older versions) or RuntimeError (1.x+) when
-            # allow_copy=False cannot be honoured (e.g., series contains nulls).  Both are caught
-            # so the fallback copy path works across Polars versions.
+                # Polars raises InvalidOperationError (older versions) or RuntimeError (1.x+) when
+                # allow_copy=False cannot be honoured (e.g., series contains nulls).  Both are caught
+                # so the fallback copy path works across Polars versions.
                 return np.asarray(series.to_numpy(allow_copy=True),
                                   dtype=context.get_numpy_dtype())
     else:
@@ -1714,9 +1716,9 @@ cdef np_c.ndarray _polars_temporal_to_numpy(series):
     try:
         return series.to_numpy(allow_copy=False)
     except (pl.exceptions.InvalidOperationError, RuntimeError):
-            # Polars raises InvalidOperationError (older versions) or RuntimeError (1.x+) when
-            # allow_copy=False cannot be honoured (e.g., series contains nulls).  Both are caught
-            # so the fallback copy path works across Polars versions.
+        # Polars raises InvalidOperationError (older versions) or RuntimeError (1.x+) when
+        # allow_copy=False cannot be honoured (e.g., series contains nulls).  Both are caught
+        # so the fallback copy path works across Polars versions.
         return series.to_numpy(allow_copy=True)
 
 
@@ -1857,7 +1859,7 @@ cdef int _export_vt_polars_time(_ExportContext context, Py_ssize_t start, Py_ssi
 
 
 cdef int _export_vt_polars_string(_ExportContext context, Py_ssize_t start, Py_ssize_t count,
-                                   sbdf_c.sbdf_object** obj):
+                                  sbdf_c.sbdf_object** obj):
     """Export a Polars String/Utf8 column directly from Arrow LargeUtf8 buffers.
 
     Reads raw UTF-8 bytes from the Arrow values buffer using the Arrow int64
