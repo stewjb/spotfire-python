@@ -1049,11 +1049,11 @@ def import_data(sbdf_file, output_format=OutputFormat.PANDAS):
             elif vt_id == sbdf_c.SBDF_TIMESPANTYPEID:
                 # values is int64 ms — reinterpret directly as timedelta64[ms]; same trick as
                 # datetime: view() avoids any per-element conversion.  NaT sentinel written
-                # directly to eliminate the second .loc pass.
-                arr_ms = values.copy()
+                # directly to eliminate the second .loc pass.  No .copy() needed: values is
+                # already a fresh array from np.concatenate() in get_values_array().
                 if invalid_array.any():
-                    arr_ms[invalid_array] = np.iinfo(np.int64).min  # NaT sentinel for timedelta64
-                column_series = pd.Series(arr_ms.view('timedelta64[ms]'), dtype='timedelta64[ms]',
+                    values[invalid_array] = np.iinfo(np.int64).min  # NaT sentinel for timedelta64
+                column_series = pd.Series(values.view('timedelta64[ms]'), dtype='timedelta64[ms]',
                                           name=column_names[i])
             elif dtype_name in ("Int32", "Int64"):
                 # Build nullable integer array with mask in one shot; avoids a second-pass
@@ -1064,7 +1064,8 @@ def import_data(sbdf_file, output_format=OutputFormat.PANDAS):
                     name=column_names[i])
             else:
                 column_series = pd.Series(values, dtype=dtype_name, name=column_names[i])
-                column_series.loc[invalid_array] = None
+                if invalid_array.any():
+                    column_series.loc[invalid_array] = None
             imported_columns.append(column_series)
         dataframe = pd.DataFrame(dict(zip(column_names, imported_columns)))
         for i in range(num_columns):
@@ -2070,10 +2071,12 @@ cdef int _export_vt_time(_ExportContext context, Py_ssize_t start, Py_ssize_t co
         if not context.invalid_array[start + i]:
             val_i = context.values_array[start + i]
             if isinstance(val_i, datetime.time):
-                val = datetime.datetime.combine(datetime.datetime.min, val_i) - datetime.datetime.min
+                # Direct integer arithmetic on time attributes avoids allocating a datetime
+                # and timedelta object per row (which datetime.combine(...) - min requires).
+                new_values[i] = ((val_i.hour * 3600 + val_i.minute * 60 + val_i.second) * 1000
+                                 + val_i.microsecond // 1000)
             else:
                 raise SBDFError(f"cannot convert '{val_i}' to Spotfire Time type; incompatible types")
-            new_values[i] = val // _TIMEDELTA_ONE_MSEC
     return sbdf_c.sbdf_obj_create_arr(sbdf_c.sbdf_vt_time(), <int>count, np_c.PyArray_DATA(new_values), NULL, obj)
 
 
