@@ -1742,22 +1742,25 @@ cdef void _export_polars_setup_arrays(_ExportContext context, series):
             raw = series.cast(pl.Datetime('ms')).cast(pl.Int64)
         else:
             raw = series.cast(pl.Int64)
-        context.set_arrays(_polars_temporal_to_numpy(raw), invalids)
+        # fill_null(0) ensures to_numpy() returns int64 (not float64 with nan) when nulls
+        # are present.  The invalids mask already records which positions are null, so the
+        # sentinel value of 0 at those slots is never read by the SBDF writer.
+        context.set_arrays(_polars_temporal_to_numpy(raw.fill_null(0)), invalids)
         context.polars_exporter_id = _POL_EXP_DATETIME
     elif dtype_name == "Duration":
         if getattr(series.dtype, 'time_unit', 'ms') != 'ms':
             raw = series.cast(pl.Duration('ms')).cast(pl.Int64)
         else:
             raw = series.cast(pl.Int64)
-        context.set_arrays(_polars_temporal_to_numpy(raw), invalids)
+        context.set_arrays(_polars_temporal_to_numpy(raw.fill_null(0)), invalids)
         context.polars_exporter_id = _POL_EXP_TIMESPAN
     elif dtype_name == "Date":
         # Date is always int32 days since Unix epoch in Arrow.
-        context.set_arrays(_polars_temporal_to_numpy(series.cast(pl.Int32)), invalids)
+        context.set_arrays(_polars_temporal_to_numpy(series.cast(pl.Int32).fill_null(0)), invalids)
         context.polars_exporter_id = _POL_EXP_DATE
     elif dtype_name == "Time":
         # Time is always int64 ns since midnight in Arrow.
-        context.set_arrays(_polars_temporal_to_numpy(series.cast(pl.Int64)), invalids)
+        context.set_arrays(_polars_temporal_to_numpy(series.cast(pl.Int64).fill_null(0)), invalids)
         context.polars_exporter_id = _POL_EXP_TIME
     elif dtype_name in ("Utf8", "String", "Categorical", "Enum"):
         # Arrow fast path: read raw UTF-8 bytes directly from the Arrow LargeUtf8 buffers,
