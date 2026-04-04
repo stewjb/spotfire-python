@@ -185,7 +185,7 @@ jobs:
           pip install html-testRunner polars pillow
       - name: Rebuild extension with AddressSanitizer + UBSan
         env:
-          CFLAGS: "-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          CFLAGS: "-fsanitize=address,undefined -fno-omit-frame-pointer -g -D_FORTIFY_SOURCE=2 -fstack-protector-strong"
           LDFLAGS: "-fsanitize=address,undefined"
         run: python setup.py build_ext --inplace
       - name: Run tests under AddressSanitizer + UBSan
