@@ -562,7 +562,7 @@ class SbdfTest(unittest.TestCase):
         for spotfire_type, dtype in [("DateTime", "datetime64[ms]"),
                                      ("TimeSpan", "timedelta64[ms]")]:
             with self.subTest(type=spotfire_type):
-                dataframe = pd.DataFrame({"x": pd.array([pd.NaT, pd.NaT, pd.NaT], dtype=dtype)})
+                dataframe = pd.DataFrame({"x": pd.array([pd.NaT, pd.NaT, pd.NaT], dtype=dtype)})  # type: ignore[call-overload]
                 new_df = self._roundtrip_dataframe(dataframe)
                 self.assertEqual(len(new_df), 3)
                 self.assertTrue(new_df["x"].isna().all())
@@ -586,7 +586,7 @@ class SbdfTest(unittest.TestCase):
 
     def test_numpy_timedelta_with_nulls(self):
         """Verify that numpy timedelta64 columns with NaT values export and import correctly."""
-        values = pd.array([
+        values = pd.array([  # type: ignore[call-overload]
             pd.NaT,
             pd.Timedelta(days=1),
             pd.NaT,
