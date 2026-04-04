@@ -188,7 +188,7 @@ jobs:
           LIBASAN=$(gcc -print-file-name=libasan.so)
           LD_PRELOAD="$LIBASAN" PYTHONMALLOC=malloc python -m spotfire.test
         env:
-          ASAN_OPTIONS: "detect_leaks=0:allocator_may_return_null=1"
+          ASAN_OPTIONS: "detect_leaks=0:allocator_may_return_null=1:intercept_cxx_exceptions=0"
           TEST_ENVIRONMENT: asan
       - uses: actions/upload-artifact@v4
         if: always()
