@@ -807,3 +807,22 @@ class SbdfPolarsTest(unittest.TestCase):
         polars_df = pl.DataFrame({"x": [1, 2, 3]})
         with self.assertRaisesRegex(TypeError, "Polars"):
             spotfire.set_spotfire_types(polars_df, {"x": "Integer"})  # type: ignore[arg-type]
+
+    def test_polars_string_multichunk(self):
+        """Verify Polars String exports spanning multiple SBDF row slices give correct values.
+
+        The Arrow buffer path in _export_extract_string_obj_arrow uses raw C pointer
+        arithmetic (values_buf + offsets[idx]).  A second chunk (start=100_000, count=1)
+        verifies the offset into the values buffer is computed correctly when start > 0.
+        """
+        n = 100_001
+        labels = ["a"] * n
+        labels[-1] = "sentinel"
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = f"{tempdir}/multichunk.sbdf"
+            with self.assertWarns(sbdf.SBDFWarning):
+                sbdf.export_data(pl.DataFrame({"s": labels}), path)
+            result = sbdf.import_data(path)
+        self.assertEqual(len(result), n)
+        self.assertEqual(result.at[0, "s"], "a")
+        self.assertEqual(result.at[n - 1, "s"], "sentinel")
