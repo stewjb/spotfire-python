@@ -1004,13 +1004,15 @@ cdef _export_obj_dataframe(obj):
                 context.set_arrays(values, invalids)
                 context.values_precomputed_sbdf_int64 = True
             elif context.valuetype_id == sbdf_c.SBDF_DATETYPEID and col_dtype == object:
-                # Pre-compute int64 SBDF-ms for date (object) columns: pd.to_datetime iterates
-                # in C rather than Python, then view('int64') * 86400000 + epoch offset gives
-                # the same zero-copy export path as datetime64.  Use day 0 (Unix epoch) as the
-                # na_value to keep null positions safe before zeroing them explicitly.
-                days = pd.to_datetime(obj[col], errors='coerce').to_numpy(
-                    dtype='datetime64[D]', na_value=np.datetime64(0, 'D'))
-                values = days.view(np.int64).copy() * 86400000 + _SBDF_TO_UNIX_EPOCH_MS
+                # Pre-compute int64 SBDF-ms for date (object) columns: numpy's asarray covers
+                # the full year-1 to year-9999 range (pd.to_datetime silently coerces out-of-
+                # Timestamp-range dates to NaT).  Zero null positions before multiplication to
+                # prevent int64 overflow from NaT's INT64_MIN sentinel.
+                days_dt64 = np.asarray(obj[col], dtype='datetime64[D]')
+                days = days_dt64.view(np.int64).copy()
+                if invalids.any():
+                    days[invalids] = 0
+                values = days * 86400000 + _SBDF_TO_UNIX_EPOCH_MS
                 if invalids.any():
                     values[invalids] = 0
                 context.set_arrays(values, invalids)
