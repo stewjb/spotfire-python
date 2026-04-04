@@ -1099,6 +1099,7 @@ cdef int _POL_EXP_DATETIME = 1
 cdef int _POL_EXP_DATE = 2
 cdef int _POL_EXP_TIMESPAN = 3
 cdef int _POL_EXP_TIME = 4
+cdef int _POL_EXP_STRING = 5
 
 # Export data to SBDF from Python.
 @cython.auto_pickle(False)
@@ -1108,7 +1109,9 @@ cdef class _ExportContext:
     cdef np_c.ndarray values_array
     cdef np_c.ndarray invalid_array
     cdef bint any_invalid
-    cdef int polars_exporter_id  # 0=default; 1=datetime; 2=date; 3=timespan; 4=time
+    cdef int polars_exporter_id  # 0=default; 1=datetime; 2=date; 3=timespan; 4=time; 5=string
+    cdef np_c.ndarray _arrow_offsets  # int64 view of Arrow offsets buffer (string fast path)
+    cdef np_c.ndarray _arrow_data     # uint8 view of Arrow values buffer (string fast path)
 
     def __init__(self):
         """Initialize the export context."""
@@ -1117,6 +1120,8 @@ cdef class _ExportContext:
         self.invalid_array = None
         self.any_invalid = False
         self.polars_exporter_id = 0
+        self._arrow_offsets = None
+        self._arrow_data = None
 
     cdef void set_arrays(self, np_c.ndarray values, invalid):
         """Set the NumPy ``ndarray`` with the values to export and a list or NumPy ``ndarray`` of whether each value
@@ -1129,11 +1134,26 @@ cdef class _ExportContext:
         self.invalid_array = np.asarray(invalid, dtype="bool")
         self.any_invalid = any(invalid)
 
+    cdef void set_arrow_string(self, np_c.ndarray offsets, np_c.ndarray data,
+                                np_c.ndarray invalid):
+        """Set Arrow buffer views for a Polars String/Utf8 column (bypasses values_array).
+
+        :param offsets: int64 numpy view of the Arrow LargeUtf8 offsets buffer (length n+1)
+        :param data: uint8 numpy view of the Arrow LargeUtf8 values buffer (concatenated UTF-8 bytes)
+        :param invalid: bool numpy array marking null rows
+        """
+        self._arrow_offsets = offsets
+        self._arrow_data = data
+        self.invalid_array = invalid
+        self.any_invalid = bool(invalid.any())
+
     def __len__(self):
-        if self.values_array is None:
-            return 0
-        else:
+        if self.values_array is not None:
             return np_c.PyArray_DIM(self.values_array, 0)
+        elif self._arrow_offsets is not None:
+            return np_c.PyArray_DIM(self._arrow_offsets, 0) - 1
+        else:
+            return 0
 
     cdef void set_valuetype_id(self, valuetype_id: int):
         """Set the value type to export this column as.
@@ -1737,6 +1757,29 @@ cdef void _export_polars_setup_arrays(_ExportContext context, series):
         # Time is always int64 ns since midnight in Arrow.
         context.set_arrays(_polars_temporal_to_numpy(series.cast(pl.Int64)), invalids)
         context.polars_exporter_id = _POL_EXP_TIME
+    elif dtype_name in ("Utf8", "String", "Categorical", "Enum"):
+        # Arrow fast path: read raw UTF-8 bytes directly from the Arrow LargeUtf8 buffers,
+        # bypassing Python str object creation and re-encoding in the C helper.
+        if dtype_name in ("Categorical", "Enum"):
+            series = series.cast(pl.Utf8)
+        arrow_arr = series.to_arrow()
+        # Older Polars versions may return a ChunkedArray; combine into a single array.
+        if hasattr(arrow_arr, 'combine_chunks'):
+            arrow_arr = arrow_arr.combine_chunks()
+        if str(arrow_arr.type) not in ("large_string", "large_utf8"):
+            raise SBDFError(f"expected Arrow large_string type for Polars String column, "
+                            f"got '{arrow_arr.type}'")
+        bufs = arrow_arr.buffers()
+        # bufs[0] = validity bitmap (unused; we use the Polars invalids mask instead)
+        # bufs[1] = int64 offsets (n+1 values); bufs[2] = concatenated UTF-8 bytes
+        offsets_np = np.frombuffer(bufs[1], dtype=np.int64)
+        data_raw = bufs[2]
+        if data_raw is not None and len(data_raw) > 0:
+            data_np = np.frombuffer(data_raw, dtype=np.uint8)
+        else:
+            data_np = np.empty(0, dtype=np.uint8)
+        context.set_arrow_string(offsets_np, data_np, np.asarray(invalids, dtype=bool))
+        context.polars_exporter_id = _POL_EXP_STRING
     else:
         context.set_arrays(_export_polars_series_to_numpy(context, series, invalids), invalids)
 
@@ -1807,6 +1850,24 @@ cdef int _export_vt_polars_time(_ExportContext context, Py_ssize_t start, Py_ssi
     for i in range(count):
         dst[i] = src[start + i] // 1000000
     return sbdf_c.sbdf_obj_create_arr(sbdf_c.sbdf_vt_time(), <int>count, np_c.PyArray_DATA(out), NULL, obj)
+
+
+cdef int _export_vt_polars_string(_ExportContext context, Py_ssize_t start, Py_ssize_t count,
+                                   sbdf_c.sbdf_object** obj):
+    """Export a Polars String/Utf8 column directly from Arrow LargeUtf8 buffers.
+
+    Reads raw UTF-8 bytes from the Arrow values buffer using the Arrow int64
+    offsets buffer, bypassing Python str object creation and re-encoding.
+    The Polars Arrow type must be large_string (int64 offsets); an AssertionError
+    is raised at setup time (in _export_polars_setup_arrays) if it is not.
+    """
+    obj[0] = _export_extract_string_obj_arrow(
+        <const char *>np_c.PyArray_DATA(context._arrow_data),
+        <const long long *>np_c.PyArray_DATA(context._arrow_offsets),
+        <const unsigned char *>np_c.PyArray_DATA(context.invalid_array),
+        start, count
+    )
+    return sbdf_c.SBDF_OK
 
 
 cdef int _export_vt_bool(_ExportContext context, Py_ssize_t start, Py_ssize_t count, sbdf_c.sbdf_object** obj):
@@ -2477,6 +2538,8 @@ def export_data(obj, sbdf_file, default_column_name="x", Py_ssize_t rows_per_sli
                     exporter = _export_vt_polars_timespan
                 elif pol_id == _POL_EXP_TIME:
                     exporter = _export_vt_polars_time
+                elif pol_id == _POL_EXP_STRING:
+                    exporter = _export_vt_polars_string
                 else:
                     exporter = _export_get_exporter(context.get_valuetype_id())
                 error = exporter(context, row_offset, rows_per_slice, &values)
