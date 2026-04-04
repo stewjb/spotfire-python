@@ -95,18 +95,18 @@ class SbdfTest(unittest.TestCase):
                                                       "Double", "DateTime", "Date", "Time",
                                                       "TimeSpan", "String", "Decimal", "Binary"])
 
-        self.assertEqual(dataframe.get("Boolean")[0:6].tolist(), [False, True, None, False, True, None])
-        self.assertEqual(dataframe.get("Integer")[0:6].dropna().tolist(), [69.0, 73.0, 75.0, 79.0])
-        self.assertEqual(dataframe.get("Long")[0:6].dropna().tolist(), [72.0, 74.0, 78.0, 80.0])
-        for i, j in zip(dataframe.get("Float")[0:9].dropna().tolist(),
+        self.assertEqual(dataframe.get("Boolean")[0:6].tolist(), [False, True, None, False, True, None])  # type: ignore[index]
+        self.assertEqual(dataframe.get("Integer")[0:6].dropna().tolist(), [69.0, 73.0, 75.0, 79.0])  # type: ignore[index]
+        self.assertEqual(dataframe.get("Long")[0:6].dropna().tolist(), [72.0, 74.0, 78.0, 80.0])  # type: ignore[index]
+        for i, j in zip(dataframe.get("Float")[0:9].dropna().tolist(),  # type: ignore[index]
                         [12.0, 12.333333, 13.0, 13.333333, 13.666667, 14.0, 14.333333]):
             self.assertAlmostEqual(i, j)
-        for i, j in zip(dataframe.get("Double")[0:9].dropna().tolist(),
+        for i, j in zip(dataframe.get("Double")[0:9].dropna().tolist(),  # type: ignore[index]
                         [116.18, 122.46, 125.6, 128.74, 131.88, 135.02]):
             self.assertAlmostEqual(i, j)
-        self.assertEqual(dataframe.get("String")[0:5].tolist(),
+        self.assertEqual(dataframe.get("String")[0:5].tolist(),  # type: ignore[index]
                          ["The", "quick", None, None, "jumps"])
-        self.assertEqual(dataframe.get("Decimal")[0:4].tolist(),
+        self.assertEqual(dataframe.get("Decimal")[0:4].tolist(),  # type: ignore[index]
                          [decimal.Decimal("1438.1565"), None, None, decimal.Decimal("1538.493")])
 
     def test_read_10001(self):
@@ -133,8 +133,8 @@ class SbdfTest(unittest.TestCase):
         self.assertEqual(dataframe.at[10000, "Boolean"], True)
         self.assertTrue(pd.isnull(dataframe.at[10000, "Integer"]))
         self.assertEqual(dataframe.at[10000, "Long"], 19118)
-        self.assertAlmostEqual(dataframe.at[10000, "Float"], 3042.33325195313)
-        self.assertAlmostEqual(dataframe.at[10000, "Double"], 28661.92)
+        self.assertAlmostEqual(dataframe.at[10000, "Float"], 3042.33325195313)  # type: ignore[misc, arg-type]
+        self.assertAlmostEqual(dataframe.at[10000, "Double"], 28661.92)  # type: ignore[misc, arg-type]
         self.assertEqual(dataframe.at[10000, "DateTime"], datetime.datetime(1583, 11, 1, 0, 0))
         self.assertEqual(dataframe.at[10000, "Date"], datetime.date(1583, 11, 1))
         self.assertEqual(dataframe.at[10000, "Time"], datetime.time(21, 25, 40))
@@ -509,6 +509,22 @@ class SbdfTest(unittest.TestCase):
         else:
             self.fail(f"Expected PNG bytes, got {type(val)}: {val!r}")
 
+    def test_export_dict_of_lists(self):
+        """Exporting a dict of lists should produce a valid SBDF file."""
+        data = {"ints": [1, 2, 3], "floats": [1.1, 2.2, 3.3], "strings": ["a", "b", "c"]}
+        result = self._roundtrip_dataframe(data)
+        self.assertEqual(len(result), 3)
+        self.assertEqual(result["ints"].dropna().astype(int).tolist(), [1, 2, 3])
+        self.assertAlmostEqual(result["floats"][0], 1.1)
+        self.assertEqual(result["strings"].tolist(), ["a", "b", "c"])
+
+    def test_export_list(self):
+        """Exporting a plain Python list should produce a single-column SBDF file."""
+        result = self._roundtrip_dataframe([10, 20, 30])
+        self.assertEqual(len(result), 3)
+        self.assertEqual(result.columns[0], "x")
+        self.assertEqual(result["x"].dropna().astype(int).tolist(), [10, 20, 30])
+
     def test_export_import_unicode_path(self):
         """Test export and import with a Unicode file path."""
         dataframe = pd.DataFrame({"col": [1, 2, 3], "txt": ["a", "b", "c"]})
@@ -782,10 +798,10 @@ class SbdfPolarsTest(unittest.TestCase):
         """get_spotfire_types should raise TypeError with a Polars-specific message."""
         polars_df = pl.DataFrame({"x": [1, 2, 3]})
         with self.assertRaisesRegex(TypeError, "Polars"):
-            spotfire.get_spotfire_types(polars_df)
+            spotfire.get_spotfire_types(polars_df)  # type: ignore[arg-type]
 
     def test_set_types_polars_error(self):
         """set_spotfire_types should raise TypeError with a Polars-specific message."""
         polars_df = pl.DataFrame({"x": [1, 2, 3]})
         with self.assertRaisesRegex(TypeError, "Polars"):
-            spotfire.set_spotfire_types(polars_df, {"x": "Integer"})
+            spotfire.set_spotfire_types(polars_df, {"x": "Integer"})  # type: ignore[arg-type]
