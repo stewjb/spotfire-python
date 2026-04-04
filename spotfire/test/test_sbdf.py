@@ -16,7 +16,8 @@ try:
 except ImportError:
     gpd = None  # type: ignore[assignment]
 try:
-    import matplotlib.pyplot  # type: ignore[import-not-found]
+    import matplotlib  # type: ignore[import-not-found]
+    import matplotlib.pyplot
 except ImportError:
     matplotlib = None  # type: ignore[assignment]
 try:
