@@ -1571,9 +1571,6 @@ cdef _export_obj_iterable(obj, default_column_name):
 
     .. seealso: https://docs.python.org/3/glossary.html#term-iterable
     """
-    cdef np_c.ndarray values
-    cdef np_c.ndarray invalids
-
     context = _ExportContext()
     context.set_valuetype_id(_export_infer_valuetype_from_type(obj, "list"))
     values_list = []
