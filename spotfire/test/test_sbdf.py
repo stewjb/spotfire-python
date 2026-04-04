@@ -601,6 +601,79 @@ class SbdfTest(unittest.TestCase):
         self.assertEqual(df2.at[3, "x"], datetime.timedelta(seconds=-30))
         self.assertTrue(pd.isnull(df2.at[4, "x"]))
 
+    def test_empty_dataframe(self):
+        """Verify 0-row DataFrames export and import correctly for all column types.
+
+        Exercises the zero-size array code paths that boundscheck=False leaves unchecked,
+        ensuring no off-by-one occurs at the loop boundary when row_count is 0.
+        """
+        cases = [
+            ("bool",            pd.DataFrame({"x": pd.array([], dtype="bool")})),
+            ("int64",           pd.DataFrame({"x": pd.array([], dtype="int64")})),
+            ("float64",         pd.DataFrame({"x": pd.array([], dtype="float64")})),
+            ("datetime64[ms]",  pd.DataFrame({"x": pd.array([], dtype="datetime64[ms]")})),
+            ("timedelta64[ms]", pd.DataFrame({"x": pd.array([], dtype="timedelta64[ms]")})),
+        ]
+        for label, df in cases:
+            with self.subTest(dtype=label):
+                df2 = self._roundtrip_dataframe(df)
+                self.assertEqual(len(df2), 0)
+                self.assertIn("x", df2.columns)
+        # String requires an explicit type annotation when the column is empty (no values to infer from)
+        df = pd.DataFrame({"x": pd.Series([], dtype=object)})
+        spotfire.set_spotfire_types(df, {"x": "String"})
+        with self.subTest(dtype="string"):
+            df2 = self._roundtrip_dataframe(df)
+            self.assertEqual(len(df2), 0)
+            self.assertIn("x", df2.columns)
+
+    def test_multichunk_export(self):
+        """Verify exports spanning multiple SBDF row slices produce correct values.
+
+        The default slice size is ``100_000 // num_columns`` rows, so a 100_001-row
+        single-column DataFrame forces a second slice (start=100_000, count=1).
+        This exercises _export_vt_time's direct ``[start+i]`` indexing and the
+        _export_get_offset_ptr pointer arithmetic for precomputed int64 paths,
+        both of which are unchecked under boundscheck=False.
+        """
+        n = 100_001
+
+        # time: _export_vt_time accesses context.values_array[start + i] directly
+        times = [datetime.time(0, 0, 0)] * n
+        times[-1] = datetime.time(23, 59, 58)
+        df = pd.DataFrame({"t": times})
+        df2 = self._roundtrip_dataframe(df)
+        self.assertEqual(len(df2), n)
+        self.assertEqual(df2.at[0, "t"], datetime.time(0, 0, 0))
+        self.assertEqual(df2.at[n - 1, "t"], datetime.time(23, 59, 58))
+
+        # date: precomputed int64 via np.asarray, exported via _export_get_offset_ptr
+        dates = [datetime.date(2000, 1, 1)] * n
+        dates[-1] = datetime.date(2001, 9, 11)
+        df = pd.DataFrame({"d": dates})
+        df2 = self._roundtrip_dataframe(df)
+        self.assertEqual(len(df2), n)
+        self.assertEqual(df2.at[0, "d"], datetime.date(2000, 1, 1))
+        self.assertEqual(df2.at[n - 1, "d"], datetime.date(2001, 9, 11))
+
+        # datetime64[ms]: precomputed int64, exported via _export_get_offset_ptr
+        dts = pd.array([pd.Timestamp("2000-01-01")] * n, dtype="datetime64[ms]")
+        dts[-1] = pd.Timestamp("1969-07-20 20:17:40")
+        df = pd.DataFrame({"dt": dts})
+        df2 = self._roundtrip_dataframe(df)
+        self.assertEqual(len(df2), n)
+        self.assertEqual(df2.at[0, "dt"], datetime.datetime(2000, 1, 1))
+        self.assertEqual(df2.at[n - 1, "dt"], datetime.datetime(1969, 7, 20, 20, 17, 40))
+
+        # timedelta64[ms]: precomputed int64, exported via _export_get_offset_ptr
+        tds = pd.array([pd.Timedelta(0)] * n, dtype="timedelta64[ms]")
+        tds[-1] = pd.Timedelta(seconds=-1)
+        df = pd.DataFrame({"td": tds})
+        df2 = self._roundtrip_dataframe(df)
+        self.assertEqual(len(df2), n)
+        self.assertEqual(df2.at[0, "td"], datetime.timedelta(0))
+        self.assertEqual(df2.at[n - 1, "td"], datetime.timedelta(seconds=-1))
+
     def test_image_matplot(self):
         """Verify Matplotlib figures export properly."""
         matplotlib.pyplot.clf()
