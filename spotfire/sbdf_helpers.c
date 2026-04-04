@@ -80,15 +80,22 @@ void _allocated_list_done(struct _AllocatedList *alist, _allocated_dealloc_fn fu
     }
 }
 
-/* Utility functions for extracting strings from Python ``Union[str,bytes]`` into C */
-sbdf_object *_export_extract_string_obj(PyObject *vals, PyObject *invalids, Py_ssize_t start, Py_ssize_t count) {
+/* Utility functions for extracting strings from Python ``Union[str,bytes]`` into C.
+ * vals_ptr is PyArray_DATA() of a numpy object array; each slot is a borrowed PyObject*.
+ * inv_ptr is PyArray_DATA() of a numpy bool array; nonzero byte means null/invalid.
+ */
+sbdf_object *_export_extract_string_obj(void **vals_ptr, const unsigned char *inv_ptr, Py_ssize_t start, Py_ssize_t count) {
     sbdf_object *t = calloc(1, sizeof(sbdf_object));
+    if (!t) {
+        PyErr_NoMemory();
+        return NULL;
+    }
 
     t->type = sbdf_vt_string();
     t->count = (int)count;
     char **data = (char **)calloc(count, sizeof(char *));
     if (!data) {
-        PyErr_Format(PyExc_MemoryError, "memory exhausted");
+        PyErr_NoMemory();
         sbdf_obj_destroy(t);
         return NULL;
     }
@@ -96,53 +103,33 @@ sbdf_object *_export_extract_string_obj(PyObject *vals, PyObject *invalids, Py_s
 
     for (int i = 0; i < count; i++) {
         Py_ssize_t idx = start + i;
-        PyObject *inv = PySequence_GetItem(invalids, idx);
-        if (inv == NULL) {
-            sbdf_obj_destroy(t);
-            return NULL;
-        }
-        if (PyObject_IsTrue(inv)) {
-            /* true: invalid value, add empty value to t->data */
+        if (inv_ptr[idx]) {
+            /* null/invalid value: write empty string */
             data[i] = sbdf_str_create_len("", 0);
         } else {
-            /* false: valid value, add encoded value to t->data */
-            PyObject *val = PySequence_GetItem(vals, idx);
-            if (val == NULL) {
-                Py_XDECREF(inv);
-                sbdf_obj_destroy(t);
-                return NULL;
-            }
+            /* valid value: borrowed ref from numpy object array — no Py_DECREF */
+            PyObject *val = (PyObject *)vals_ptr[idx];
             PyObject *val_str = PyObject_Str(val);
             if (val_str == NULL) {
-                Py_XDECREF(val);
-                Py_XDECREF(inv);
                 sbdf_obj_destroy(t);
                 return NULL;
             }
             PyObject *val_encoded = PyObject_CallMethod(val_str, "encode", "s", "utf-8");
+            Py_DECREF(val_str);
             if (val_encoded == NULL) {
-                Py_XDECREF(val_str);
-                Py_XDECREF(val);
-                Py_XDECREF(inv);
                 sbdf_obj_destroy(t);
                 return NULL;
             }
             char *val_buf;
             Py_ssize_t val_len;
             if (PyBytes_AsStringAndSize(val_encoded, &val_buf, &val_len) == -1) {
-                Py_XDECREF(val_encoded);
-                Py_XDECREF(val_str);
-                Py_XDECREF(val);
-                Py_XDECREF(inv);
+                Py_DECREF(val_encoded);
                 sbdf_obj_destroy(t);
                 return NULL;
             }
             data[i] = sbdf_str_create_len(val_buf, (int)val_len);
-            Py_XDECREF(val_encoded);
-            Py_XDECREF(val_str);
-            Py_XDECREF(val);
+            Py_DECREF(val_encoded);
         }
-        Py_XDECREF(inv);
     }
 
     return t;
@@ -178,14 +165,18 @@ sbdf_object *_export_extract_string_obj_arrow(const char *values_buf, const int6
     return t;
 }
 
-sbdf_object *_export_extract_binary_obj(PyObject *vals, PyObject *invalids, Py_ssize_t start, Py_ssize_t count) {
+sbdf_object *_export_extract_binary_obj(void **vals_ptr, const unsigned char *inv_ptr, Py_ssize_t start, Py_ssize_t count) {
     sbdf_object *t = calloc(1, sizeof(sbdf_object));
+    if (!t) {
+        PyErr_NoMemory();
+        return NULL;
+    }
 
     t->type = sbdf_vt_binary();
     t->count = (int)count;
     unsigned char **data = (unsigned char **)calloc(count, sizeof(unsigned char *));
     if (!data) {
-        PyErr_Format(PyExc_MemoryError, "memory exhausted");
+        PyErr_NoMemory();
         sbdf_obj_destroy(t);
         return NULL;
     }
@@ -193,41 +184,25 @@ sbdf_object *_export_extract_binary_obj(PyObject *vals, PyObject *invalids, Py_s
 
     for (int i = 0; i < count; i++) {
         Py_ssize_t idx = start + i;
-        PyObject *inv = PySequence_GetItem(invalids, idx);
-        if (inv == NULL) {
-            sbdf_obj_destroy(t);
-            return NULL;
-        }
-        if (PyObject_IsTrue(inv)) {
-            /* true: invalid value, add empty value to t->data */
+        if (inv_ptr[idx]) {
+            /* null/invalid value: write empty byte array */
             data[i] = sbdf_ba_create(0, 0);
         } else {
-            /* false: valid value, add value to t->data */
-            PyObject *val = PySequence_GetItem(vals, idx);
-            if (val == NULL) {
-                Py_XDECREF(inv);
-                sbdf_obj_destroy(t);
-                return NULL;
-            }
+            /* valid value: borrowed ref from numpy object array — no Py_DECREF */
+            PyObject *val = (PyObject *)vals_ptr[idx];
             if (!PyBytes_Check(val)) {
                 PyErr_Format(PyExc_SBDFError, "cannot convert '%S' to Spotfire Binary type; incompatible types", val);
-                Py_XDECREF(val);
-                Py_XDECREF(inv);
                 sbdf_obj_destroy(t);
                 return NULL;
             }
             char *val_buf;
             Py_ssize_t val_len;
             if (PyBytes_AsStringAndSize(val, &val_buf, &val_len) == -1) {
-                Py_XDECREF(val);
-                Py_XDECREF(inv);
                 sbdf_obj_destroy(t);
                 return NULL;
             }
             data[i] = sbdf_ba_create((unsigned char *)val_buf, (int)val_len);
-            Py_XDECREF(val);
         }
-        Py_XDECREF(inv);
     }
 
     return t;

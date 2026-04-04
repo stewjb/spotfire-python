@@ -35,9 +35,13 @@ struct _SbdfDecimal {
     unsigned char exponent_high_and_sign;
 };
 
-/* Utility functions for extracting strings from Python ``Union[str,bytes]`` into C */
-extern sbdf_object *_export_extract_string_obj(PyObject *vals, PyObject *invalids, Py_ssize_t start, Py_ssize_t count);
-extern sbdf_object *_export_extract_binary_obj(PyObject *vals, PyObject *invalids, Py_ssize_t start, Py_ssize_t count);
+/* Utility functions for extracting strings from Python ``Union[str,bytes]`` into C.
+ * vals_ptr: PyArray_DATA() of a numpy object array (array of PyObject* slots).
+ * inv_ptr:  PyArray_DATA() of a numpy bool array (one byte per element, nonzero == null).
+ * Both pointers must remain valid for the duration of the call (caller holds the numpy arrays).
+ */
+extern sbdf_object *_export_extract_string_obj(void **vals_ptr, const unsigned char *inv_ptr, Py_ssize_t start, Py_ssize_t count);
+extern sbdf_object *_export_extract_binary_obj(void **vals_ptr, const unsigned char *inv_ptr, Py_ssize_t start, Py_ssize_t count);
 
 /* Fast string export directly from Arrow LargeUtf8 buffers: no Python str objects created.
  * values_buf: concatenated UTF-8 bytes from the Arrow values buffer.

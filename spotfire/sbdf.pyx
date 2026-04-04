@@ -1063,9 +1063,16 @@ def import_data(sbdf_file, output_format=OutputFormat.PANDAS):
                     pd.arrays.IntegerArray(values.astype(base_dtype), invalid_array),
                     name=column_names[i])
             else:
-                column_series = pd.Series(values, dtype=dtype_name, name=column_names[i])
-                if invalid_array.any():
-                    column_series.loc[invalid_array] = None
+                if values.dtype.kind == 'O':
+                    # Object-dtype (string) arrays can be pre-masked before Series construction,
+                    # avoiding the pandas .loc indexing overhead on the post-construction path.
+                    if invalid_array.any():
+                        values[invalid_array] = None
+                    column_series = pd.Series(values, dtype=dtype_name, name=column_names[i])
+                else:
+                    column_series = pd.Series(values, dtype=dtype_name, name=column_names[i])
+                    if invalid_array.any():
+                        column_series.loc[invalid_array] = None
             imported_columns.append(column_series)
         dataframe = pd.DataFrame(dict(zip(column_names, imported_columns)))
         for i in range(num_columns):
@@ -2118,13 +2125,19 @@ cdef int _export_vt_timespan(_ExportContext context, Py_ssize_t start, Py_ssize_
 
 cdef int _export_vt_string(_ExportContext context, Py_ssize_t start, Py_ssize_t count, sbdf_c.sbdf_object** obj):
     """Export a slice of data consisting of string values."""
-    obj[0] = _export_extract_string_obj(context.values_array, context.invalid_array, start, count)
+    obj[0] = _export_extract_string_obj(
+        <void**>np_c.PyArray_DATA(context.values_array),
+        <unsigned char*>np_c.PyArray_DATA(context.invalid_array),
+        start, count)
     return sbdf_c.SBDF_OK
 
 
 cdef int _export_vt_binary(_ExportContext context, Py_ssize_t start, Py_ssize_t count, sbdf_c.sbdf_object** obj):
     """Export a slice of data consisting of binary values."""
-    obj[0] = _export_extract_binary_obj(context.values_array, context.invalid_array, start, count)
+    obj[0] = _export_extract_binary_obj(
+        <void**>np_c.PyArray_DATA(context.values_array),
+        <unsigned char*>np_c.PyArray_DATA(context.invalid_array),
+        start, count)
     return sbdf_c.SBDF_OK
 
 
@@ -2363,15 +2376,16 @@ cdef (int, sbdf_c.sbdf_valuearray*) _export_process_invalid_array(_ExportContext
 
 
 cdef inline void* _export_get_offset_ptr(np_c.ndarray array, Py_ssize_t start, Py_ssize_t count):
-    """Slice a NumPy ``ndarray`` using Cython memoryviews.
+    """Return a pointer into ``array`` at element ``start``.
 
     :param array: the NumPy array to slice
     :param start: the index of the first element of the slice
-    :param count: the number of elements to include in the slice
-    :return: a pointer to the memory (owned by the NumPy array) of the slice
+    :param count: unused; kept for call-site compatibility
+    :return: a pointer to element ``start`` in the array's data buffer
     """
-    cdef np_c.ndarray sliced = array[start : start + count]
-    return np_c.PyArray_DATA(sliced)
+    cdef char *base = <char*>np_c.PyArray_DATA(array)
+    cdef Py_ssize_t sz = <Py_ssize_t>array.itemsize
+    return <void*>(base + start * sz)
 
 
 cdef sbdf_c.sbdf_metadata_head* _export_metadata(dict md, int column_num):
@@ -2414,7 +2428,12 @@ cdef sbdf_c.sbdf_metadata_head* _export_metadata(dict md, int column_num):
         val_type.id = _export_infer_valuetype_from_type(val, f"{metadata_description} metadata '{name_str}'")
 
         if val_type.id == sbdf_c.SBDF_STRINGTYPEID:
-            obj = _export_extract_string_obj(val, [False] * val_len, 0, val_len)
+            _meta_vals = np.asarray(val, dtype=object)
+            _meta_inv = np.zeros(val_len, dtype=bool)
+            obj = _export_extract_string_obj(
+                <void**>np_c.PyArray_DATA(_meta_vals),
+                <unsigned char*>np_c.PyArray_DATA(_meta_inv),
+                0, val_len)
             error = sbdf_c.SBDF_OK
         elif val_type.id == sbdf_c.SBDF_DOUBLETYPEID:
             data_double = <double*>mem.PyMem_RawMalloc(val_len * sizeof(double))
@@ -2474,7 +2493,12 @@ cdef sbdf_c.sbdf_metadata_head* _export_metadata(dict md, int column_num):
             error = sbdf_c.sbdf_obj_create_arr(val_type, val_len, data_datetime, NULL, &obj)
             mem.PyMem_RawFree(<void*>data_datetime)
         elif val_type.id == sbdf_c.SBDF_BINARYTYPEID:
-            obj = _export_extract_binary_obj(val, [False] * val_len, 0, val_len)
+            _meta_vals = np.asarray(val, dtype=object)
+            _meta_inv = np.zeros(val_len, dtype=bool)
+            obj = _export_extract_binary_obj(
+                <void**>np_c.PyArray_DATA(_meta_vals),
+                <unsigned char*>np_c.PyArray_DATA(_meta_inv),
+                0, val_len)
             error = sbdf_c.SBDF_OK
         elif val_type.id == sbdf_c.SBDF_DECIMALTYPEID:
             data_decimal = <_SbdfDecimal*>mem.PyMem_RawMalloc(val_len * sizeof(_SbdfDecimal))
