@@ -95,18 +95,18 @@ class SbdfTest(unittest.TestCase):
                                                       "Double", "DateTime", "Date", "Time",
                                                       "TimeSpan", "String", "Decimal", "Binary"])
 
-        self.assertEqual(dataframe.get("Boolean")[0:6].tolist(), [False, True, None, False, True, None])
-        self.assertEqual(dataframe.get("Integer")[0:6].dropna().tolist(), [69.0, 73.0, 75.0, 79.0])
-        self.assertEqual(dataframe.get("Long")[0:6].dropna().tolist(), [72.0, 74.0, 78.0, 80.0])
-        for i, j in zip(dataframe.get("Float")[0:9].dropna().tolist(),
+        self.assertEqual(dataframe.get("Boolean")[0:6].tolist(), [False, True, None, False, True, None])  # type: ignore[index]
+        self.assertEqual(dataframe.get("Integer")[0:6].dropna().tolist(), [69.0, 73.0, 75.0, 79.0])  # type: ignore[index]
+        self.assertEqual(dataframe.get("Long")[0:6].dropna().tolist(), [72.0, 74.0, 78.0, 80.0])  # type: ignore[index]
+        for i, j in zip(dataframe.get("Float")[0:9].dropna().tolist(),  # type: ignore[index]
                         [12.0, 12.333333, 13.0, 13.333333, 13.666667, 14.0, 14.333333]):
             self.assertAlmostEqual(i, j)
-        for i, j in zip(dataframe.get("Double")[0:9].dropna().tolist(),
+        for i, j in zip(dataframe.get("Double")[0:9].dropna().tolist(),  # type: ignore[index]
                         [116.18, 122.46, 125.6, 128.74, 131.88, 135.02]):
             self.assertAlmostEqual(i, j)
-        self.assertEqual(dataframe.get("String")[0:5].tolist(),
+        self.assertEqual(dataframe.get("String")[0:5].tolist(),  # type: ignore[index]
                          ["The", "quick", None, None, "jumps"])
-        self.assertEqual(dataframe.get("Decimal")[0:4].tolist(),
+        self.assertEqual(dataframe.get("Decimal")[0:4].tolist(),  # type: ignore[index]
                          [decimal.Decimal("1438.1565"), None, None, decimal.Decimal("1538.493")])
 
     def test_read_10001(self):
@@ -133,8 +133,8 @@ class SbdfTest(unittest.TestCase):
         self.assertEqual(dataframe.at[10000, "Boolean"], True)
         self.assertTrue(pd.isnull(dataframe.at[10000, "Integer"]))
         self.assertEqual(dataframe.at[10000, "Long"], 19118)
-        self.assertAlmostEqual(dataframe.at[10000, "Float"], 3042.33325195313)
-        self.assertAlmostEqual(dataframe.at[10000, "Double"], 28661.92)
+        self.assertAlmostEqual(dataframe.at[10000, "Float"], 3042.33325195313)  # type: ignore[misc, arg-type]
+        self.assertAlmostEqual(dataframe.at[10000, "Double"], 28661.92)  # type: ignore[misc, arg-type]
         self.assertEqual(dataframe.at[10000, "DateTime"], datetime.datetime(1583, 11, 1, 0, 0))
         self.assertEqual(dataframe.at[10000, "Date"], datetime.date(1583, 11, 1))
         self.assertEqual(dataframe.at[10000, "Time"], datetime.time(21, 25, 40))
@@ -725,3 +725,84 @@ class SbdfPolarsTest(unittest.TestCase):
         self.assertAlmostEqual(result["vals"][0], 1.0)
         self.assertTrue(pd.isnull(result["vals"][1]))
         self.assertAlmostEqual(result["vals"][2], 3.0)
+<<<<<<< Updated upstream
+=======
+
+    # Date conversion correctness test
+
+    def test_date_view_equals_astype(self):
+        """The in-place epoch-shift + view conversion used in _import_build_polars_dataframe
+        should produce the same datetime64[D] values as the reference astype() path for a
+        range of dates spanning the SBDF epoch, dates before the Unix epoch, the Unix epoch
+        itself, a recent date, and the maximum representable date."""
+        sbdf_epoch_ms = 62135596800000  # ms from datetime(1,1,1) to datetime(1970,1,1)
+        test_dates = [
+            datetime.date(1, 1, 1),      # SBDF epoch — largest negative offset from Unix
+            datetime.date(1969, 12, 31), # one day before Unix epoch
+            datetime.date(1970, 1, 1),   # Unix epoch — must give day 0
+            datetime.date(1970, 1, 2),   # one day after Unix epoch
+            datetime.date(2024, 1, 15),  # arbitrary recent date
+            datetime.date(9999, 12, 31), # maximum Python date
+        ]
+        for test_date in test_dates:
+            # Reproduce the raw SBDF int64 value exactly as the C importer would produce it.
+            sbdf_ms = int(
+                (test_date - datetime.date(1, 1, 1)) / datetime.timedelta(milliseconds=1)
+            )
+            arr = np.array([sbdf_ms], dtype=np.int64)
+
+            # Apply the same in-place conversion used in _import_build_polars_dataframe.
+            arr -= sbdf_epoch_ms
+            arr //= 86400000
+            view_result = arr.view('datetime64[D]')[0]
+
+            # Reference: convert the Python date directly via astype.
+            ref_result = np.array([test_date], dtype=object).astype('datetime64[D]')[0]
+
+            self.assertEqual(
+                view_result, ref_result,
+                msg=f"Mismatch for {test_date}: view={view_result}, astype={ref_result}"
+            )
+
+    # Metadata warning tests
+
+    def test_polars_import_meta_warning(self):
+        """import_data with output_format=OutputFormat.POLARS should warn that metadata is not preserved."""
+        with self.assertWarnsRegex(sbdf.SBDFWarning, "metadata"):
+            sbdf.import_data(utils.get_test_data_file("sbdf/1.sbdf"), output_format=sbdf.OutputFormat.POLARS)
+
+    def test_polars_df_export_meta_warn(self):
+        """export_data with a Polars DataFrame should warn that metadata is not preserved."""
+        polars_df = pl.DataFrame({"x": [1, 2, 3]})
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = f"{tempdir}/meta_warn.sbdf"
+            with self.assertWarnsRegex(sbdf.SBDFWarning, "metadata"):
+                sbdf.export_data(polars_df, path)
+
+    def test_polars_series_meta_export(self):
+        """export_data with a Polars Series should warn that metadata is not preserved."""
+        series = pl.Series("x", [1, 2, 3])
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = f"{tempdir}/meta_warn_series.sbdf"
+            with self.assertWarnsRegex(sbdf.SBDFWarning, "metadata"):
+                sbdf.export_data(series, path)
+
+    # Metadata public-API error tests
+
+    def test_copy_metadata_polars_error(self):
+        """copy_metadata should raise TypeError with a Polars-specific message."""
+        polars_df = pl.DataFrame({"x": [1, 2, 3]})
+        with self.assertRaisesRegex(TypeError, "Polars"):
+            spotfire.copy_metadata(polars_df, polars_df)
+
+    def test_get_types_polars_error(self):
+        """get_spotfire_types should raise TypeError with a Polars-specific message."""
+        polars_df = pl.DataFrame({"x": [1, 2, 3]})
+        with self.assertRaisesRegex(TypeError, "Polars"):
+            spotfire.get_spotfire_types(polars_df)  # type: ignore[arg-type]
+
+    def test_set_types_polars_error(self):
+        """set_spotfire_types should raise TypeError with a Polars-specific message."""
+        polars_df = pl.DataFrame({"x": [1, 2, 3]})
+        with self.assertRaisesRegex(TypeError, "Polars"):
+            spotfire.set_spotfire_types(polars_df, {"x": "Integer"})  # type: ignore[arg-type]
