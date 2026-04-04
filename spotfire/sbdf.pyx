@@ -819,7 +819,7 @@ cdef object _import_build_polars_dataframe(column_names, importer_contexts):
             values -= _SBDF_TO_UNIX_EPOCH_MS
             col = pl.Series(name=name, values=values, dtype=pl.Int64).cast(pl.Datetime('ms'))
             if invalids.any():
-                col = col.scatter(np.where(invalids)[0].tolist(), None)
+                col = col.scatter(np.where(invalids)[0], None)
 
         elif vt_id == sbdf_c.SBDF_DATETYPEID:
             # _import_vt_date_int32 already converted ms→days and wrote int32 directly.
@@ -828,7 +828,7 @@ cdef object _import_build_polars_dataframe(column_names, importer_contexts):
             context.clear_values_arrays()
             col = pl.Series(name=name, values=values, dtype=pl.Date)
             if invalids.any():
-                col = col.scatter(np.where(invalids)[0].tolist(), None)
+                col = col.scatter(np.where(invalids)[0], None)
 
         elif vt_id == sbdf_c.SBDF_TIMESPANTYPEID:
             # Timespans are int64 ms with no epoch bias.  Duration('ms') is int64 in Arrow,
@@ -837,7 +837,7 @@ cdef object _import_build_polars_dataframe(column_names, importer_contexts):
             context.clear_values_arrays()
             col = pl.Series(name=name, values=values, dtype=pl.Int64).cast(pl.Duration('ms'))
             if invalids.any():
-                col = col.scatter(np.where(invalids)[0].tolist(), None)
+                col = col.scatter(np.where(invalids)[0], None)
 
         elif vt_id == sbdf_c.SBDF_TIMETYPEID:
             # _import_vt_time_int64 stores int64 ns since midnight (Polars Time internal format).
@@ -852,7 +852,7 @@ cdef object _import_build_polars_dataframe(column_names, importer_contexts):
                 values[invalids] = 0
             col = pl.Series(name=name, values=values, dtype=pl.Time)
             if invalids.any():
-                col = col.scatter(np.where(invalids)[0].tolist(), None)
+                col = col.scatter(np.where(invalids)[0], None)
 
         elif not context.is_object_numpy_type():
             # Numeric types (bool, int, float): numpy → Polars directly; Polars may zero-copy
@@ -860,7 +860,7 @@ cdef object _import_build_polars_dataframe(column_names, importer_contexts):
             values = context.get_values_array()
             col = pl.Series(name=name, values=values, dtype=_import_polars_dtype(context))
             if invalids.any():
-                col = col.scatter(np.where(invalids)[0].tolist(), None)
+                col = col.scatter(np.where(invalids)[0], None)
 
         else:
             # String, time, binary, decimal: Polars requires a Python list (no compatible numpy
