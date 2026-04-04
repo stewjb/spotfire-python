@@ -1267,7 +1267,8 @@ cdef _export_obj_dataframe(obj):
                    pd.NaT: na_value,
                    }
             col_dtype = obj[col].dtype
-            if context.valuetype_id == sbdf_c.SBDF_DATETIMETYPEID and col_dtype.kind == 'M' and not hasattr(col_dtype, 'tz'):
+            if (context.valuetype_id == sbdf_c.SBDF_DATETIMETYPEID and col_dtype.kind == 'M' and
+                    not hasattr(col_dtype, 'tz')):
                 # Tz-naive datetime64: store as datetime64[ms] so the exporter can use a
                 # vectorised view('int64') instead of per-row Python object unpacking.
                 values = obj[col].to_numpy(dtype="datetime64[ms]", na_value=np.datetime64("NaT"))
