@@ -163,3 +163,35 @@ jobs:
           mypy spotfire
           cython-lint spotfire vendor
           find spotfire -name '*_helpers.[ch]' | xargs cpplint --repository=.
+  asan:
+    name: AddressSanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Install dependencies
+        run: |
+          pip install setuptools Cython "numpy>=2.0.0rc1"
+          pip install ".[polars]"
+          pip install -r test_requirements_default.txt
+      - name: Rebuild extension with AddressSanitizer
+        env:
+          CFLAGS: "-fsanitize=address -fno-omit-frame-pointer -g"
+          LDFLAGS: "-fsanitize=address"
+        run: python setup.py build_ext --inplace
+      - name: Run tests under AddressSanitizer
+        run: |
+          LIBASAN=$(gcc -print-file-name=libasan.so)
+          LD_PRELOAD="$LIBASAN" PYTHONMALLOC=malloc python -m spotfire.test
+        env:
+          ASAN_OPTIONS: "detect_leaks=0:allocator_may_return_null=1"
+          TEST_ENVIRONMENT: asan
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-asan
+          path: build/test-results/*.html
