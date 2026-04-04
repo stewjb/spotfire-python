@@ -95,8 +95,10 @@ class SbdfTest(unittest.TestCase):
                                                       "Double", "DateTime", "Date", "Time",
                                                       "TimeSpan", "String", "Decimal", "Binary"])
 
-        self.assertEqual(dataframe.get("Boolean")[0:6].tolist(), [False, True, None, False, True, None])  # type: ignore[index]
-        self.assertEqual(dataframe.get("Integer")[0:6].dropna().tolist(), [69.0, 73.0, 75.0, 79.0])  # type: ignore[index]
+        self.assertEqual(dataframe.get("Boolean")[0:6].tolist(),  # type: ignore[index]
+                         [False, True, None, False, True, None])
+        self.assertEqual(dataframe.get("Integer")[0:6].dropna().tolist(),  # type: ignore[index]
+                         [69.0, 73.0, 75.0, 79.0])
         self.assertEqual(dataframe.get("Long")[0:6].dropna().tolist(), [72.0, 74.0, 78.0, 80.0])  # type: ignore[index]
         for i, j in zip(dataframe.get("Float")[0:9].dropna().tolist(),  # type: ignore[index]
                         [12.0, 12.333333, 13.0, 13.333333, 13.666667, 14.0, 14.333333]):
