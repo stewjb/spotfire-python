@@ -475,6 +475,132 @@ class SbdfTest(unittest.TestCase):
                 val = df2.at[1, 'x']
                 self.assertEqual(val, target)
 
+    def test_temporal_nulls_roundtrip(self):
+        """Verify that mixed-null temporal columns survive export/import with correct positions."""
+        dt = datetime.datetime
+        d = datetime.date
+        t = datetime.time
+        td = datetime.timedelta
+
+        cases = {
+            "datetime": [dt(2020, 6, 15, 12, 0, 0), None, dt(1969, 7, 20, 20, 17, 0)],
+            "date":     [d(2020, 6, 15), None, d(1969, 7, 20)],
+            "time":     [t(12, 0, 0), None, t(20, 17, 0)],
+            "timespan": [td(days=1), None, td(seconds=30)],
+        }
+        for col_name, values in cases.items():
+            with self.subTest(type=col_name):
+                df = pd.DataFrame({"x": values})
+                df2 = self._roundtrip_dataframe(df)
+                self.assertFalse(pd.isnull(df2.at[0, "x"]), "row 0 should not be null")
+                self.assertTrue(pd.isnull(df2.at[1, "x"]), "row 1 should be null")
+                self.assertFalse(pd.isnull(df2.at[2, "x"]), "row 2 should not be null")
+
+    def test_negative_timespans(self):
+        """Verify that negative timedelta values round-trip correctly."""
+        cases = [
+            datetime.timedelta(seconds=-1),
+            datetime.timedelta(days=-1),
+            datetime.timedelta(days=-5, seconds=300),
+            datetime.timedelta(milliseconds=-1),
+            datetime.timedelta(days=-1, seconds=86399, microseconds=999000),  # -1 ms
+        ]
+        df = pd.DataFrame({"x": cases})
+        df2 = self._roundtrip_dataframe(df)
+        for i, expected in enumerate(cases):
+            with self.subTest(i=i, value=expected):
+                got = df2.at[i, "x"]
+                # SBDF has millisecond resolution; truncate expected to ms
+                expected_ms = datetime.timedelta(milliseconds=expected // datetime.timedelta(milliseconds=1))
+                self.assertEqual(got, expected_ms)
+
+    def test_pre_epoch_dates(self):
+        """Verify that dates before the Unix epoch (1970-01-01) round-trip correctly."""
+        cases = [
+            datetime.date(1, 1, 1),        # SBDF epoch
+            datetime.date(1582, 10, 4),    # day before Gregorian calendar
+            datetime.date(1969, 12, 31),   # one day before Unix epoch
+            datetime.date(1970, 1, 1),     # Unix epoch
+            datetime.date(1970, 1, 2),     # one day after Unix epoch
+            datetime.date(9999, 12, 31),   # max Python date
+        ]
+        df = pd.DataFrame({"x": cases})
+        df2 = self._roundtrip_dataframe(df)
+        for i, expected in enumerate(cases):
+            with self.subTest(date=expected):
+                self.assertEqual(df2.at[i, "x"], expected)
+
+    def test_pre_epoch_datetimes(self):
+        """Verify that datetimes before the Unix epoch round-trip correctly."""
+        cases = [
+            datetime.datetime(1, 1, 1, 0, 0, 0),
+            datetime.datetime(1969, 12, 31, 23, 59, 59),
+            datetime.datetime(1969, 12, 31, 0, 0, 0),
+        ]
+        df = pd.DataFrame({"x": cases})
+        df2 = self._roundtrip_dataframe(df)
+        for i, expected in enumerate(cases):
+            with self.subTest(dt=expected):
+                self.assertEqual(df2.at[i, "x"], expected)
+
+    def test_time_edge_cases(self):
+        """Verify midnight, end-of-day, and microsecond-precision time values."""
+        cases = [
+            (datetime.time(0, 0, 0),          datetime.time(0, 0, 0)),           # midnight
+            (datetime.time(23, 59, 59, 999000), datetime.time(23, 59, 59, 999000)),  # end of day (ms boundary)
+            (datetime.time(12, 30, 45, 500),  datetime.time(12, 30, 45, 0)),     # sub-ms truncated
+            (datetime.time(0, 0, 0, 1000),    datetime.time(0, 0, 0, 1000)),     # 1 ms exactly
+        ]
+        for input_val, expected in cases:
+            with self.subTest(time=input_val):
+                df = pd.DataFrame({"x": [input_val]})
+                df2 = self._roundtrip_dataframe(df)
+                self.assertEqual(df2.at[0, "x"], expected)
+
+    def test_all_null_temporal_columns(self):
+        """Verify that all-null columns of each temporal type export and import without error."""
+        for spotfire_type, dtype in [("DateTime", "datetime64[ms]"),
+                                     ("TimeSpan", "timedelta64[ms]")]:
+            with self.subTest(type=spotfire_type):
+                df = pd.DataFrame({"x": pd.array([pd.NaT, pd.NaT, pd.NaT], dtype=dtype)})
+                df2 = self._roundtrip_dataframe(df)
+                self.assertEqual(len(df2), 3)
+                self.assertTrue(df2["x"].isna().all())
+
+    def test_numpy_datetime_with_nulls(self):
+        """Verify that numpy datetime64 columns with NaT values export and import correctly."""
+        values = pd.array([
+            pd.NaT,
+            pd.Timestamp("2020-01-01"),
+            pd.NaT,
+            pd.Timestamp("1969-07-20"),
+            pd.NaT,
+        ], dtype="datetime64[ms]")
+        df = pd.DataFrame({"x": values})
+        df2 = self._roundtrip_dataframe(df)
+        self.assertTrue(pd.isnull(df2.at[0, "x"]))
+        self.assertEqual(df2.at[1, "x"], datetime.datetime(2020, 1, 1))
+        self.assertTrue(pd.isnull(df2.at[2, "x"]))
+        self.assertEqual(df2.at[3, "x"], datetime.datetime(1969, 7, 20))
+        self.assertTrue(pd.isnull(df2.at[4, "x"]))
+
+    def test_numpy_timedelta_with_nulls(self):
+        """Verify that numpy timedelta64 columns with NaT values export and import correctly."""
+        values = pd.array([
+            pd.NaT,
+            pd.Timedelta(days=1),
+            pd.NaT,
+            pd.Timedelta(seconds=-30),
+            pd.NaT,
+        ], dtype="timedelta64[ms]")
+        df = pd.DataFrame({"x": values})
+        df2 = self._roundtrip_dataframe(df)
+        self.assertTrue(pd.isnull(df2.at[0, "x"]))
+        self.assertEqual(df2.at[1, "x"], datetime.timedelta(days=1))
+        self.assertTrue(pd.isnull(df2.at[2, "x"]))
+        self.assertEqual(df2.at[3, "x"], datetime.timedelta(seconds=-30))
+        self.assertTrue(pd.isnull(df2.at[4, "x"]))
+
     def test_image_matplot(self):
         """Verify Matplotlib figures export properly."""
         matplotlib.pyplot.clf()
