@@ -1760,26 +1760,30 @@ cdef void _export_polars_setup_arrays(_ExportContext context, series):
     elif dtype_name in ("Utf8", "String", "Categorical", "Enum"):
         # Arrow fast path: read raw UTF-8 bytes directly from the Arrow LargeUtf8 buffers,
         # bypassing Python str object creation and re-encoding in the C helper.
+        # Requires pyarrow; falls back to the to_numpy() path when it is not installed.
         if dtype_name in ("Categorical", "Enum"):
             series = series.cast(pl.Utf8)
-        arrow_arr = series.to_arrow()
-        # Older Polars versions may return a ChunkedArray; combine into a single array.
-        if hasattr(arrow_arr, 'combine_chunks'):
-            arrow_arr = arrow_arr.combine_chunks()
-        if str(arrow_arr.type) not in ("large_string", "large_utf8"):
-            raise SBDFError(f"expected Arrow large_string type for Polars String column, "
-                            f"got '{arrow_arr.type}'")
-        bufs = arrow_arr.buffers()
-        # bufs[0] = validity bitmap (unused; we use the Polars invalids mask instead)
-        # bufs[1] = int64 offsets (n+1 values); bufs[2] = concatenated UTF-8 bytes
-        offsets_np = np.frombuffer(bufs[1], dtype=np.int64)
-        data_raw = bufs[2]
-        if data_raw is not None and len(data_raw) > 0:
-            data_np = np.frombuffer(data_raw, dtype=np.uint8)
-        else:
-            data_np = np.empty(0, dtype=np.uint8)
-        context.set_arrow_string(offsets_np, data_np, np.asarray(invalids, dtype=bool))
-        context.polars_exporter_id = _POL_EXP_STRING
+        try:
+            arrow_arr = series.to_arrow()
+            # Older Polars versions may return a ChunkedArray; combine into a single array.
+            if hasattr(arrow_arr, 'combine_chunks'):
+                arrow_arr = arrow_arr.combine_chunks()
+            if str(arrow_arr.type) not in ("large_string", "large_utf8"):
+                raise SBDFError(f"expected Arrow large_string type for Polars String column, "
+                                f"got '{arrow_arr.type}'")
+            bufs = arrow_arr.buffers()
+            # bufs[0] = validity bitmap (unused; we use the Polars invalids mask instead)
+            # bufs[1] = int64 offsets (n+1 values); bufs[2] = concatenated UTF-8 bytes
+            offsets_np = np.frombuffer(bufs[1], dtype=np.int64)
+            data_raw = bufs[2]
+            if data_raw is not None and len(data_raw) > 0:
+                data_np = np.frombuffer(data_raw, dtype=np.uint8)
+            else:
+                data_np = np.empty(0, dtype=np.uint8)
+            context.set_arrow_string(offsets_np, data_np, np.asarray(invalids, dtype=bool))
+            context.polars_exporter_id = _POL_EXP_STRING
+        except ImportError:
+            context.set_arrays(_export_polars_series_to_numpy(context, series, invalids), invalids)
     else:
         context.set_arrays(_export_polars_series_to_numpy(context, series, invalids), invalids)
 
