@@ -1,4 +1,4 @@
-# cython: language_level=3
+# cython: language_level=3, boundscheck=False, wraparound=False, cdivision=True
 
 # Copyright © 2022. Cloud Software Group, Inc.
 # This file is subject to the license terms contained
@@ -954,14 +954,11 @@ def import_data(sbdf_file, output_format=OutputFormat.PANDAS):
                 importer_contexts.append(_ImportContext(np_c.NPY_INT32, col_type))
                 importer_fns[i] = _import_vts_numpy
             elif col_type.id == sbdf_c.SBDF_DATETIMETYPEID:
-                if output_format == OutputFormat.POLARS:
-                    # Store raw int64 ms values; _import_build_polars_dataframe will adjust the
-                    # epoch offset and reinterpret as datetime64[ms] without boxing Python objects.
-                    importer_contexts.append(_ImportContext(np_c.NPY_INT64, col_type))
-                    importer_fns[i] = _import_vts_numpy
-                else:
-                    importer_contexts.append(_ImportContext(np_c.NPY_OBJECT, col_type))
-                    importer_fns[i] = _import_vt_datetime
+                # Store raw int64 ms values for both Polars and Pandas paths.  The Pandas
+                # assembly converts vectorially with pd.to_datetime(); _import_build_polars_dataframe
+                # adjusts the epoch offset and casts zero-copy.
+                importer_contexts.append(_ImportContext(np_c.NPY_INT64, col_type))
+                importer_fns[i] = _import_vts_numpy
             elif col_type.id == sbdf_c.SBDF_DATETYPEID:
                 if output_format == OutputFormat.POLARS:
                     importer_contexts.append(_ImportContext(np_c.NPY_INT32, col_type))
@@ -970,14 +967,10 @@ def import_data(sbdf_file, output_format=OutputFormat.PANDAS):
                     importer_contexts.append(_ImportContext(np_c.NPY_OBJECT, col_type))
                     importer_fns[i] = _import_vt_date
             elif col_type.id == sbdf_c.SBDF_TIMESPANTYPEID:
-                if output_format == OutputFormat.POLARS:
-                    # Timespans are stored as int64 ms with no epoch — reinterpret directly as
-                    # timedelta64[ms] in _import_build_polars_dataframe.
-                    importer_contexts.append(_ImportContext(np_c.NPY_INT64, col_type))
-                    importer_fns[i] = _import_vts_numpy
-                else:
-                    importer_contexts.append(_ImportContext(np_c.NPY_OBJECT, col_type))
-                    importer_fns[i] = _import_vt_timespan
+                # Store raw int64 ms for both paths.  Pandas assembly uses pd.to_timedelta();
+                # _import_build_polars_dataframe reinterprets as Duration('ms') zero-copy.
+                importer_contexts.append(_ImportContext(np_c.NPY_INT64, col_type))
+                importer_fns[i] = _import_vts_numpy
             elif col_type.id == sbdf_c.SBDF_TIMETYPEID:
                 if output_format == OutputFormat.POLARS:
                     importer_contexts.append(_ImportContext(np_c.NPY_INT64, col_type))
@@ -1039,8 +1032,30 @@ def import_data(sbdf_file, output_format=OutputFormat.PANDAS):
         for i in range(num_columns):
             values = importer_contexts[i].get_values_array()
             invalid_array = importer_contexts[i].get_invalid_array()
+            vt_id = importer_contexts[i].get_value_type_id()
             dtype_name = importer_contexts[i].get_pandas_dtype_name()
-            if dtype_name in ("Int32", "Int64"):
+            if vt_id == sbdf_c.SBDF_DATETIMETYPEID:
+                # values is int64 ms since SBDF epoch.  Subtract the fixed SBDF→Unix offset,
+                # then reinterpret the buffer as datetime64[ms] via view() — zero-copy, no
+                # nanosecond conversion, and wide enough to represent the full SBDF date range
+                # (year 1 through 9999).  Write the NaT sentinel (INT64_MIN) directly into the
+                # int64 buffer so NaT positions are set in a single pass without a slow second
+                # .loc assignment through the Pandas indexing layer.
+                arr_ms = values - _SBDF_TO_UNIX_EPOCH_MS
+                if invalid_array.any():
+                    arr_ms[invalid_array] = np.iinfo(np.int64).min  # NaT sentinel for datetime64
+                column_series = pd.Series(arr_ms.view('datetime64[ms]'), dtype='datetime64[ms]',
+                                          name=column_names[i])
+            elif vt_id == sbdf_c.SBDF_TIMESPANTYPEID:
+                # values is int64 ms — reinterpret directly as timedelta64[ms]; same trick as
+                # datetime: view() avoids any per-element conversion.  NaT sentinel written
+                # directly to eliminate the second .loc pass.  No .copy() needed: values is
+                # already a fresh array from np.concatenate() in get_values_array().
+                if invalid_array.any():
+                    values[invalid_array] = np.iinfo(np.int64).min  # NaT sentinel for timedelta64
+                column_series = pd.Series(values.view('timedelta64[ms]'), dtype='timedelta64[ms]',
+                                          name=column_names[i])
+            elif dtype_name in ("Int32", "Int64"):
                 # Build nullable integer array with mask in one shot; avoids a second-pass
                 # .loc assignment that triggers Pandas dtype coercion overhead.
                 base_dtype = "int32" if dtype_name == "Int32" else "int64"
@@ -1048,10 +1063,18 @@ def import_data(sbdf_file, output_format=OutputFormat.PANDAS):
                     pd.arrays.IntegerArray(values.astype(base_dtype), invalid_array),
                     name=column_names[i])
             else:
-                column_series = pd.Series(values, dtype=dtype_name, name=column_names[i])
-                column_series.loc[invalid_array] = None
+                if values.dtype.kind == 'O':
+                    # Object-dtype (string) arrays can be pre-masked before Series construction,
+                    # avoiding the pandas .loc indexing overhead on the post-construction path.
+                    if invalid_array.any():
+                        values[invalid_array] = None
+                    column_series = pd.Series(values, dtype=dtype_name, name=column_names[i])
+                else:
+                    column_series = pd.Series(values, dtype=dtype_name, name=column_names[i])
+                    if invalid_array.any():
+                        column_series.loc[invalid_array] = None
             imported_columns.append(column_series)
-        dataframe = pd.concat(imported_columns, axis=1)
+        dataframe = pd.DataFrame(dict(zip(column_names, imported_columns)))
         for i in range(num_columns):
             dataframe[column_names[i]].spotfire_column_metadata = column_metadata[i]
             dataframe[column_names[i]].attrs['spotfire_type'] = importer_contexts[i].get_spotfire_type_name()
@@ -1114,6 +1137,7 @@ cdef class _ExportContext:
     cdef int polars_exporter_id  # 0=default; 1=datetime; 2=date; 3=timespan; 4=time; 5=string
     cdef np_c.ndarray _arrow_offsets  # int64 view of Arrow offsets buffer (string fast path)
     cdef np_c.ndarray _arrow_data     # uint8 view of Arrow values buffer (string fast path)
+    cdef bint values_precomputed_sbdf_int64  # True when values_array already holds int64 SBDF-ms
 
     def __init__(self):
         """Initialize the export context."""
@@ -1124,6 +1148,7 @@ cdef class _ExportContext:
         self.polars_exporter_id = 0
         self._arrow_offsets = None
         self._arrow_data = None
+        self.values_precomputed_sbdf_int64 = False
 
     cdef void set_arrays(self, np_c.ndarray values, invalid):
         """Set the NumPy ``ndarray`` with the values to export and a list or NumPy ``ndarray`` of whether each value
@@ -1134,7 +1159,7 @@ cdef class _ExportContext:
         """
         self.values_array = values
         self.invalid_array = np.asarray(invalid, dtype="bool")
-        self.any_invalid = any(invalid)
+        self.any_invalid = bool(self.invalid_array.any())
 
     cdef void set_arrow_string(self, np_c.ndarray offsets, np_c.ndarray data,
                                np_c.ndarray invalid):
@@ -1250,12 +1275,49 @@ cdef _export_obj_dataframe(obj):
                    pd.NA: na_value,
                    pd.NaT: na_value,
                    }
-            if obj[col].dtype == "object":
+            col_dtype = obj[col].dtype
+            invalids = pd.isnull(obj[col])
+            if (context.valuetype_id == sbdf_c.SBDF_DATETIMETYPEID and col_dtype.kind == 'M' and
+                    not hasattr(col_dtype, 'tz')):
+                # Pre-compute int64 SBDF-ms once so the exporter is zero-copy (no per-chunk
+                # alloc+copy+add).  view('int64') + offset produces a new contiguous int64 array;
+                # NaT positions (INT64_MIN + offset, still valid int64) are zeroed here so the
+                # exporter can call _export_get_offset_ptr directly without further work.
+                raw = obj[col].to_numpy(dtype="datetime64[ms]", na_value=np.datetime64("NaT"))
+                values = raw.view(np.int64) + _SBDF_TO_UNIX_EPOCH_MS
+                if invalids.any():
+                    values[invalids] = 0
+                context.set_arrays(values, invalids)
+                context.values_precomputed_sbdf_int64 = True
+            elif context.valuetype_id == sbdf_c.SBDF_TIMESPANTYPEID and col_dtype.kind == 'm':
+                # Same zero-copy pre-computation for timedelta64[ms]: int64 view IS already ms,
+                # no epoch offset required — just copy so we can safely zero invalid positions.
+                raw = obj[col].to_numpy(dtype="timedelta64[ms]", na_value=np.timedelta64("NaT"))
+                values = raw.view(np.int64).copy()
+                if invalids.any():
+                    values[invalids] = 0
+                context.set_arrays(values, invalids)
+                context.values_precomputed_sbdf_int64 = True
+            elif context.valuetype_id == sbdf_c.SBDF_DATETYPEID and col_dtype == object:
+                # Pre-compute int64 SBDF-ms for date (object) columns: numpy's asarray covers
+                # the full year-1 to year-9999 range (pd.to_datetime silently coerces out-of-
+                # Timestamp-range dates to NaT).  Zero null positions before multiplication to
+                # prevent int64 overflow from NaT's INT64_MIN sentinel.
+                days_dt64 = np.asarray(obj[col], dtype='datetime64[D]')
+                days = days_dt64.view(np.int64).copy()
+                if invalids.any():
+                    days[invalids] = 0
+                values = days * 86400000 + _SBDF_TO_UNIX_EPOCH_MS
+                if invalids.any():
+                    values[invalids] = 0
+                context.set_arrays(values, invalids)
+                context.values_precomputed_sbdf_int64 = True
+            elif col_dtype == "object":
                 values = obj[col].replace(nas).to_numpy()
+                context.set_arrays(values, invalids)
             else:
                 values = obj[col].replace(nas).to_numpy(dtype=context.get_numpy_dtype())
-            invalids = pd.isnull(obj[col])
-            context.set_arrays(values, invalids)
+                context.set_arrays(values, invalids)
             exporter_contexts.append(context)
             try:
                 column_metadata.append(obj[col].spotfire_column_metadata)
@@ -1948,24 +2010,38 @@ cdef int _export_vt_datetime(_ExportContext context, Py_ssize_t start, Py_ssize_
     """Export a slice of data consisting of datetime values."""
     cdef np_c.npy_intp shape[1]
     shape[0] = <np_c.npy_intp>count
-    cdef np_c.ndarray new_values = np_c.PyArray_ZEROS(1, shape, np_c.NPY_INT64, 0)
+    cdef np_c.ndarray new_values
     cdef int i
-    current_tz = datetime.datetime.now().astimezone().tzinfo
-    for i in range(count):
-        if not context.invalid_array[start + i]:
-            val_i = context.values_array[start + i]
-            if isinstance(val_i, pd.Timestamp):
-                if val_i.tz:
-                    dt = val_i.tz_convert(current_tz).tz_localize(None).to_pydatetime()
+    if context.values_precomputed_sbdf_int64:
+        # Zero-copy path: values_array already holds int64 SBDF-ms with invalids zeroed.
+        return sbdf_c.sbdf_obj_create_arr(sbdf_c.sbdf_vt_datetime(), <int>count,
+                                          _export_get_offset_ptr(context.values_array, start, count),
+                                          NULL, obj)
+    if context.values_array.dtype.kind == 'M':
+        # Fast path for tz-naive datetime64[ms]: single numpy op produces a new int64 array
+        # with the SBDF epoch offset applied (no separate alloc+copy+add steps).
+        new_values = context.values_array[start:start + count].view(np.int64) + _SBDF_TO_UNIX_EPOCH_MS
+        invalid_slice = context.invalid_array[start:start + count]
+        if invalid_slice.any():
+            new_values[invalid_slice] = 0
+    else:
+        new_values = np_c.PyArray_ZEROS(1, shape, np_c.NPY_INT64, 0)
+        current_tz = datetime.datetime.now().astimezone().tzinfo
+        for i in range(count):
+            if not context.invalid_array[start + i]:
+                val_i = context.values_array[start + i]
+                if isinstance(val_i, pd.Timestamp):
+                    if val_i.tz:
+                        dt = val_i.tz_convert(current_tz).tz_localize(None).to_pydatetime()
+                    else:
+                        dt = val_i.to_pydatetime()
+                elif isinstance(val_i, np.datetime64):
+                    dt = np.datetime64(val_i, "ms").astype(datetime.datetime)
+                elif isinstance(val_i, datetime.datetime):
+                    dt = val_i
                 else:
-                    dt = val_i.to_pydatetime()
-            elif isinstance(val_i, np.datetime64):
-                dt = np.datetime64(val_i, "ms").astype(datetime.datetime)
-            elif isinstance(val_i, datetime.datetime):
-                dt = val_i
-            else:
-                raise SBDFError(f"cannot convert '{val_i}' to Spotfire DateTime type; incompatible types")
-            new_values[i] = int((dt - _DATETIME_EPOCH) / _TIMEDELTA_ONE_MSEC)
+                    raise SBDFError(f"cannot convert '{val_i}' to Spotfire DateTime type; incompatible types")
+                new_values[i] = int((dt - _DATETIME_EPOCH) / _TIMEDELTA_ONE_MSEC)
     return sbdf_c.sbdf_obj_create_arr(sbdf_c.sbdf_vt_datetime(), <int>count, np_c.PyArray_DATA(new_values), NULL, obj)
 
 
@@ -1973,8 +2049,14 @@ cdef int _export_vt_date(_ExportContext context, Py_ssize_t start, Py_ssize_t co
     """Export a slice of data consisting of date values."""
     cdef np_c.npy_intp shape[1]
     shape[0] = <np_c.npy_intp> count
-    cdef np_c.ndarray new_values = np_c.PyArray_ZEROS(1, shape, np_c.NPY_INT64, 0)
+    cdef np_c.ndarray new_values
     cdef int i
+    if context.values_precomputed_sbdf_int64:
+        # Zero-copy path: values_array already holds int64 SBDF-ms (midnight) with invalids zeroed.
+        return sbdf_c.sbdf_obj_create_arr(sbdf_c.sbdf_vt_date(), <int>count,
+                                          _export_get_offset_ptr(context.values_array, start, count),
+                                          NULL, obj)
+    new_values = np_c.PyArray_ZEROS(1, shape, np_c.NPY_INT64, 0)
     for i in range(count):
         if not context.invalid_array[start + i]:
             val_i = context.values_array[start + i]
@@ -1998,10 +2080,12 @@ cdef int _export_vt_time(_ExportContext context, Py_ssize_t start, Py_ssize_t co
         if not context.invalid_array[start + i]:
             val_i = context.values_array[start + i]
             if isinstance(val_i, datetime.time):
-                val = datetime.datetime.combine(datetime.datetime.min, val_i) - datetime.datetime.min
+                # Direct integer arithmetic on time attributes avoids allocating a datetime
+                # and timedelta object per row (which datetime.combine(...) - min requires).
+                new_values[i] = ((val_i.hour * 3600 + val_i.minute * 60 + val_i.second) * 1000
+                                 + val_i.microsecond // 1000)
             else:
                 raise SBDFError(f"cannot convert '{val_i}' to Spotfire Time type; incompatible types")
-            new_values[i] = val // _TIMEDELTA_ONE_MSEC
     return sbdf_c.sbdf_obj_create_arr(sbdf_c.sbdf_vt_time(), <int>count, np_c.PyArray_DATA(new_values), NULL, obj)
 
 
@@ -2009,32 +2093,51 @@ cdef int _export_vt_timespan(_ExportContext context, Py_ssize_t start, Py_ssize_
     """Export a slice of data consisting of timespan values."""
     cdef np_c.npy_intp shape[1]
     shape[0] = <np_c.npy_intp>count
-    cdef np_c.ndarray new_values = np_c.PyArray_ZEROS(1, shape, np_c.NPY_INT64, 0)
+    cdef np_c.ndarray new_values
     cdef int i
-    for i in range(count):
-        if not context.invalid_array[start + i]:
-            val_i = context.values_array[start + i]
-            if isinstance(val_i, pd.Timedelta):
-                td = val_i.to_pytimedelta()
-            elif isinstance(val_i, np.timedelta64):
-                td = np.timedelta64(val_i, "ms").astype(datetime.timedelta)
-            elif isinstance(val_i, datetime.timedelta):
-                td = val_i
-            else:
-                raise SBDFError(f"cannot convert '{val_i}' to Spotfire TimeSpan type; incompatible types")
-            new_values[i] = int(td / _TIMEDELTA_ONE_MSEC)
+    if context.values_precomputed_sbdf_int64:
+        # Zero-copy path: values_array already holds int64 ms with invalids zeroed.
+        return sbdf_c.sbdf_obj_create_arr(sbdf_c.sbdf_vt_timespan(), <int>count,
+                                          _export_get_offset_ptr(context.values_array, start, count),
+                                          NULL, obj)
+    if context.values_array.dtype.kind == 'm':
+        # Fast path for timedelta64[ms]: single-op slice+view (no alloc+copy+zero triple).
+        new_values = context.values_array[start:start + count].view(np.int64).copy()
+        invalid_slice = context.invalid_array[start:start + count]
+        if invalid_slice.any():
+            new_values[invalid_slice] = 0
+    else:
+        new_values = np_c.PyArray_ZEROS(1, shape, np_c.NPY_INT64, 0)
+        for i in range(count):
+            if not context.invalid_array[start + i]:
+                val_i = context.values_array[start + i]
+                if isinstance(val_i, pd.Timedelta):
+                    td = val_i.to_pytimedelta()
+                elif isinstance(val_i, np.timedelta64):
+                    td = np.timedelta64(val_i, "ms").astype(datetime.timedelta)
+                elif isinstance(val_i, datetime.timedelta):
+                    td = val_i
+                else:
+                    raise SBDFError(f"cannot convert '{val_i}' to Spotfire TimeSpan type; incompatible types")
+                new_values[i] = int(td / _TIMEDELTA_ONE_MSEC)
     return sbdf_c.sbdf_obj_create_arr(sbdf_c.sbdf_vt_timespan(), <int>count, np_c.PyArray_DATA(new_values), NULL, obj)
 
 
 cdef int _export_vt_string(_ExportContext context, Py_ssize_t start, Py_ssize_t count, sbdf_c.sbdf_object** obj):
     """Export a slice of data consisting of string values."""
-    obj[0] = _export_extract_string_obj(context.values_array, context.invalid_array, start, count)
+    obj[0] = _export_extract_string_obj(
+        <void**>np_c.PyArray_DATA(context.values_array),
+        <unsigned char*>np_c.PyArray_DATA(context.invalid_array),
+        start, count)
     return sbdf_c.SBDF_OK
 
 
 cdef int _export_vt_binary(_ExportContext context, Py_ssize_t start, Py_ssize_t count, sbdf_c.sbdf_object** obj):
     """Export a slice of data consisting of binary values."""
-    obj[0] = _export_extract_binary_obj(context.values_array, context.invalid_array, start, count)
+    obj[0] = _export_extract_binary_obj(
+        <void**>np_c.PyArray_DATA(context.values_array),
+        <unsigned char*>np_c.PyArray_DATA(context.invalid_array),
+        start, count)
     return sbdf_c.SBDF_OK
 
 
@@ -2273,15 +2376,16 @@ cdef (int, sbdf_c.sbdf_valuearray*) _export_process_invalid_array(_ExportContext
 
 
 cdef inline void* _export_get_offset_ptr(np_c.ndarray array, Py_ssize_t start, Py_ssize_t count):
-    """Slice a NumPy ``ndarray`` using Cython memoryviews.
+    """Return a pointer into ``array`` at element ``start``.
 
     :param array: the NumPy array to slice
     :param start: the index of the first element of the slice
-    :param count: the number of elements to include in the slice
-    :return: a pointer to the memory (owned by the NumPy array) of the slice
+    :param count: unused; kept for call-site compatibility
+    :return: a pointer to element ``start`` in the array's data buffer
     """
-    cdef np_c.ndarray sliced = array[start : start + count]
-    return np_c.PyArray_DATA(sliced)
+    cdef char *base = <char*>np_c.PyArray_DATA(array)
+    cdef Py_ssize_t sz = <Py_ssize_t>array.itemsize
+    return <void*>(base + start * sz)
 
 
 cdef sbdf_c.sbdf_metadata_head* _export_metadata(dict md, int column_num):
@@ -2324,7 +2428,12 @@ cdef sbdf_c.sbdf_metadata_head* _export_metadata(dict md, int column_num):
         val_type.id = _export_infer_valuetype_from_type(val, f"{metadata_description} metadata '{name_str}'")
 
         if val_type.id == sbdf_c.SBDF_STRINGTYPEID:
-            obj = _export_extract_string_obj(val, [False] * val_len, 0, val_len)
+            _meta_vals = np.asarray(val, dtype=object)
+            _meta_inv = np.zeros(val_len, dtype=bool)
+            obj = _export_extract_string_obj(
+                <void**>np_c.PyArray_DATA(_meta_vals),
+                <unsigned char*>np_c.PyArray_DATA(_meta_inv),
+                0, val_len)
             error = sbdf_c.SBDF_OK
         elif val_type.id == sbdf_c.SBDF_DOUBLETYPEID:
             data_double = <double*>mem.PyMem_RawMalloc(val_len * sizeof(double))
@@ -2384,7 +2493,12 @@ cdef sbdf_c.sbdf_metadata_head* _export_metadata(dict md, int column_num):
             error = sbdf_c.sbdf_obj_create_arr(val_type, val_len, data_datetime, NULL, &obj)
             mem.PyMem_RawFree(<void*>data_datetime)
         elif val_type.id == sbdf_c.SBDF_BINARYTYPEID:
-            obj = _export_extract_binary_obj(val, [False] * val_len, 0, val_len)
+            _meta_vals = np.asarray(val, dtype=object)
+            _meta_inv = np.zeros(val_len, dtype=bool)
+            obj = _export_extract_binary_obj(
+                <void**>np_c.PyArray_DATA(_meta_vals),
+                <unsigned char*>np_c.PyArray_DATA(_meta_inv),
+                0, val_len)
             error = sbdf_c.SBDF_OK
         elif val_type.id == sbdf_c.SBDF_DECIMALTYPEID:
             data_decimal = <_SbdfDecimal*>mem.PyMem_RawMalloc(val_len * sizeof(_SbdfDecimal))

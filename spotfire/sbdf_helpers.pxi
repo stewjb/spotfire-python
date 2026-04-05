@@ -21,11 +21,16 @@ cdef extern from "sbdf_helpers.h":
         unsigned char exponent_low
         unsigned char exponent_high_and_sign
 
-    # Utility functions for extracting strings from Python ``Union[str,bytes]`` into C
-    sbdf_c.sbdf_object* _export_extract_string_obj(object val, object invalids, Py_ssize_t start, Py_ssize_t count) \
-        except NULL
-    sbdf_c.sbdf_object* _export_extract_binary_obj(object val, object invalids, Py_ssize_t start, Py_ssize_t count) \
-        except NULL
+    # Utility functions for extracting strings from Python ``Union[str,bytes]`` into C.
+    # vals_ptr: PyArray_DATA() of a numpy object array; inv_ptr: PyArray_DATA() of a numpy bool array.
+    sbdf_c.sbdf_object* _export_extract_string_obj(void **vals_ptr,
+                                                   const unsigned char *inv_ptr,
+                                                   Py_ssize_t start,
+                                                   Py_ssize_t count) except NULL
+    sbdf_c.sbdf_object* _export_extract_binary_obj(void **vals_ptr,
+                                                   const unsigned char *inv_ptr,
+                                                   Py_ssize_t start,
+                                                   Py_ssize_t count) except NULL
     # Fast Arrow LargeUtf8 path: no Python str objects, no re-encoding
     sbdf_c.sbdf_object* _export_extract_string_obj_arrow(const char *values_buf,
                                                          const long long *offsets,

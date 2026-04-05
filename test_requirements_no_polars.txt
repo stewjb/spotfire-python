@@ -1,6 +1,0 @@
-html-testRunner
-geopandas
-matplotlib
-pillow
-seaborn
-shapely
