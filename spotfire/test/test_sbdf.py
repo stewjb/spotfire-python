@@ -906,7 +906,7 @@ class SbdfPolarsTest(unittest.TestCase):
             "binary_col":   [None, b"\x00\x01", b"\xff", b"", b"\xde\xad"],
         })
 
-    def test_all_dtypes_export_polars_vs_pandas_path(self):
+    def test_all_dtypes_polars_export(self):
         """Exporting via the native Polars path and the Pandas path should produce identical data.
 
         The Polars DataFrame and an equivalent Pandas DataFrame (same values, same nulls) are
@@ -949,13 +949,13 @@ class SbdfPolarsTest(unittest.TestCase):
                              f"column '{col}': non-null value counts differ")
             dtype_name = pl_series.dtype.__class__.__name__
             if dtype_name in ("Float32", "Float64"):
-                for pv, pdv in zip(pl_vals, pd_vals):
-                    self.assertAlmostEqual(float(pv), float(pdv), places=4,
+                for pl_val, pdv in zip(pl_vals, pd_vals):
+                    self.assertAlmostEqual(float(pl_val), float(pdv), places=4,
                                           msg=f"column '{col}': value mismatch")
             else:
                 self.assertEqual(pl_vals, pd_vals, f"column '{col}': values differ")
 
-    def test_all_dtypes_import_polars_vs_pandas_path(self):
+    def test_all_dtypes_polars_import(self):
         """Importing the same SBDF via the Polars and Pandas paths should yield equivalent data.
 
         The same SBDF file is imported twice — once as a native Polars DataFrame and once as a
