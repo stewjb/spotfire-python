@@ -40,8 +40,10 @@ struct _SbdfDecimal {
  * inv_ptr:  PyArray_DATA() of a numpy bool array (one byte per element, nonzero == null).
  * Both pointers must remain valid for the duration of the call (caller holds the numpy arrays).
  */
-extern sbdf_object *_export_extract_string_obj(void **vals_ptr, const unsigned char *inv_ptr, Py_ssize_t start, Py_ssize_t count);
-extern sbdf_object *_export_extract_binary_obj(void **vals_ptr, const unsigned char *inv_ptr, Py_ssize_t start, Py_ssize_t count);
+extern sbdf_object *_export_extract_string_obj(void **vals_ptr, const unsigned char *inv_ptr,
+                                               Py_ssize_t start, Py_ssize_t count);
+extern sbdf_object *_export_extract_binary_obj(void **vals_ptr, const unsigned char *inv_ptr,
+                                               Py_ssize_t start, Py_ssize_t count);
 
 /* Fast string export directly from Arrow LargeUtf8 buffers: no Python str objects created.
  * values_buf: concatenated UTF-8 bytes from the Arrow values buffer.

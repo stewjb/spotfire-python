@@ -84,7 +84,8 @@ void _allocated_list_done(struct _AllocatedList *alist, _allocated_dealloc_fn fu
  * vals_ptr is PyArray_DATA() of a numpy object array; each slot is a borrowed PyObject*.
  * inv_ptr is PyArray_DATA() of a numpy bool array; nonzero byte means null/invalid.
  */
-sbdf_object *_export_extract_string_obj(void **vals_ptr, const unsigned char *inv_ptr, Py_ssize_t start, Py_ssize_t count) {
+sbdf_object *_export_extract_string_obj(void **vals_ptr, const unsigned char *inv_ptr,
+                                        Py_ssize_t start, Py_ssize_t count) {
     sbdf_object *t = calloc(1, sizeof(sbdf_object));
     if (!t) {
         PyErr_NoMemory();
@@ -165,7 +166,8 @@ sbdf_object *_export_extract_string_obj_arrow(const char *values_buf, const int6
     return t;
 }
 
-sbdf_object *_export_extract_binary_obj(void **vals_ptr, const unsigned char *inv_ptr, Py_ssize_t start, Py_ssize_t count) {
+sbdf_object *_export_extract_binary_obj(void **vals_ptr, const unsigned char *inv_ptr,
+                                        Py_ssize_t start, Py_ssize_t count) {
     sbdf_object *t = calloc(1, sizeof(sbdf_object));
     if (!t) {
         PyErr_NoMemory();
