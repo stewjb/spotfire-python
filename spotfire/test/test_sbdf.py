@@ -826,3 +826,146 @@ class SbdfPolarsTest(unittest.TestCase):
         self.assertEqual(len(result), n)
         self.assertEqual(result.at[0, "s"], "a")
         self.assertEqual(result.at[n - 1, "s"], "sentinel")
+
+    # Cross-path equivalence tests
+
+    @staticmethod
+    def _all_dtypes_polars_df():
+        """Build a canonical Polars DataFrame covering all 11 non-Decimal SBDF types.
+
+        Each column has exactly one null at a distinct row index (rotating 0–4) so every
+        row contains both valid and null values.  Non-null values cover negatives, pre-epoch
+        timestamps, edge times, and raw bytes to exercise the full value range.
+        """
+        dt = datetime.datetime
+        d = datetime.date
+        t = datetime.time
+        td = datetime.timedelta
+        return pl.DataFrame([
+            pl.Series("bool_col",     [None, True, False, True, False],
+                      dtype=pl.Boolean),
+            pl.Series("int32_col",    [1, None, -2, 3, -4],
+                      dtype=pl.Int32),
+            pl.Series("int64_col",    [1, 2_000_000_000, None, -3_000_000_000, 4],
+                      dtype=pl.Int64),
+            pl.Series("float32_col",  [1.5, -2.5, 3.5, None, 5.5],
+                      dtype=pl.Float32),
+            pl.Series("float64_col",  [1.0, -2.0, 3.0, -4.0, None],
+                      dtype=pl.Float64),
+            pl.Series("datetime_col", [None,
+                                       dt(2020, 1, 1, 12, 0, 0),
+                                       dt(1969, 7, 20, 20, 17, 0),
+                                       dt(2024, 12, 31, 23, 59, 59),
+                                       dt(1583, 1, 2, 0, 0, 0)],
+                      dtype=pl.Datetime("ms")),
+            pl.Series("date_col",     [d(2020, 1, 1), None, d(1969, 7, 20),
+                                       d(2024, 12, 31), d(1583, 1, 2)],
+                      dtype=pl.Date),
+            pl.Series("time_col",     [t(12, 0, 0), t(0, 0, 0), None, t(23, 59, 59), t(6, 30)],
+                      dtype=pl.Time),
+            pl.Series("duration_col", [td(days=1), td(seconds=30), td(days=-1), None, td(hours=2)],
+                      dtype=pl.Duration("ms")),
+            pl.Series("string_col",   ["hello", "world", "foo", "bar", None],
+                      dtype=pl.String),
+            pl.Series("binary_col",   [None, b"\x00\x01", b"\xff", b"", b"\xde\xad"],
+                      dtype=pl.Binary),
+        ])
+
+    @staticmethod
+    def _all_dtypes_pandas_df():
+        """Build the Pandas equivalent of ``_all_dtypes_polars_df()``.
+
+        Mirrors the same 5 rows, 11 columns, and null positions using Pandas nullable
+        dtypes so both DataFrames produce identical SBDF files when exported.  Float columns
+        use numpy NaN (not pd.NA) to match what the Polars export path stores for missing
+        floating-point values.
+
+        Note: ``polars.DataFrame.to_pandas()`` requires pyarrow, which is not part of the
+        required dependencies.  This helper provides the same data without that dependency.
+        """
+        dt = datetime.datetime
+        d = datetime.date
+        t = datetime.time
+        td = datetime.timedelta
+        return pd.DataFrame({
+            "bool_col":     pd.array([None, True, False, True, False],  dtype="boolean"),
+            "int32_col":    pd.array([1, None, -2, 3, -4],              dtype="Int32"),
+            "int64_col":    pd.array([1, 2_000_000_000, None, -3_000_000_000, 4], dtype="Int64"),
+            "float32_col":  np.array([1.5, -2.5, 3.5, np.nan, 5.5],    dtype="float32"),
+            "float64_col":  np.array([1.0, -2.0, 3.0, -4.0, np.nan],   dtype="float64"),
+            "datetime_col": pd.array([pd.NaT,
+                                      dt(2020, 1, 1, 12, 0, 0),
+                                      dt(1969, 7, 20, 20, 17, 0),
+                                      dt(2024, 12, 31, 23, 59, 59),
+                                      dt(1583, 1, 2, 0, 0, 0)],        dtype="datetime64[ms]"),
+            "date_col":     [d(2020, 1, 1), None, d(1969, 7, 20), d(2024, 12, 31), d(1583, 1, 2)],
+            "time_col":     [t(12, 0, 0), t(0, 0, 0), None, t(23, 59, 59), t(6, 30)],
+            "duration_col": pd.array([td(days=1), td(seconds=30), td(days=-1), pd.NaT, td(hours=2)],
+                                     dtype="timedelta64[ms]"),
+            "string_col":   ["hello", "world", "foo", "bar", None],
+            "binary_col":   [None, b"\x00\x01", b"\xff", b"", b"\xde\xad"],
+        })
+
+    def test_all_dtypes_export_polars_vs_pandas_path(self):
+        """Exporting via the native Polars path and the Pandas path should produce identical data.
+
+        The Polars DataFrame and an equivalent Pandas DataFrame (same values, same nulls) are
+        each exported to a separate SBDF file.  Both files are then imported back as Pandas and
+        compared element-wise, covering all 11 non-Decimal SBDF types with one null per column.
+        """
+        pl_df = self._all_dtypes_polars_df()
+        pd_df = self._all_dtypes_pandas_df()
+        with tempfile.TemporaryDirectory() as tempdir:
+            polars_path = f"{tempdir}/via_polars.sbdf"
+            pandas_path = f"{tempdir}/via_pandas.sbdf"
+            sbdf.export_data(pl_df, polars_path)
+            sbdf.export_data(pd_df, pandas_path)
+            pd_from_polars = sbdf.import_data(polars_path)
+            pd_from_pandas = sbdf.import_data(pandas_path)
+        pdtest.assert_frame_equal(
+            pd_from_polars, pd_from_pandas,
+            check_dtype=False, check_exact=False, rtol=1e-5,
+        )
+
+    def _assert_import_paths_equivalent(self, polars_result, pandas_result):
+        """Assert that a Polars import result and a Pandas import result contain identical data.
+
+        Uses ``Series.to_list()`` (no pyarrow required) to materialise Polars values as Python
+        objects and compares them against the corresponding Pandas column values.  Null
+        positions are verified with ``Series.is_null()`` / ``Series.isna()``, and non-null
+        float values are compared with a relative tolerance to absorb float32 representation
+        differences.
+        """
+        self.assertEqual(list(polars_result.columns), list(pandas_result.columns))
+        for col in polars_result.columns:
+            pl_series = polars_result[col]
+            pd_series = pandas_result[col]
+            pl_nulls = pl_series.is_null().to_list()
+            pd_nulls = pd_series.isna().tolist()
+            self.assertEqual(pl_nulls, pd_nulls, f"column '{col}': null positions differ")
+            pl_vals = [v for v in pl_series.to_list() if v is not None]
+            pd_vals = [v for v in pd_series.dropna().tolist() if v is not None]
+            self.assertEqual(len(pl_vals), len(pd_vals),
+                             f"column '{col}': non-null value counts differ")
+            dtype_name = pl_series.dtype.__class__.__name__
+            if dtype_name in ("Float32", "Float64"):
+                for pv, pdv in zip(pl_vals, pd_vals):
+                    self.assertAlmostEqual(float(pv), float(pdv), places=4,
+                                          msg=f"column '{col}': value mismatch")
+            else:
+                self.assertEqual(pl_vals, pd_vals, f"column '{col}': values differ")
+
+    def test_all_dtypes_import_polars_vs_pandas_path(self):
+        """Importing the same SBDF via the Polars and Pandas paths should yield equivalent data.
+
+        The same SBDF file is imported twice — once as a native Polars DataFrame and once as a
+        Pandas DataFrame — then compared column by column using ``Series.to_list()`` (no
+        pyarrow required).  Covers all 11 non-Decimal SBDF types with one null per column.
+        """
+        pl_df = self._all_dtypes_polars_df()
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = f"{tempdir}/source.sbdf"
+            sbdf.export_data(pl_df, path)
+            polars_result = sbdf.import_data(path, output_format=sbdf.OutputFormat.POLARS)
+            pandas_result = sbdf.import_data(path)
+        self._assert_import_paths_equivalent(polars_result, pandas_result)
