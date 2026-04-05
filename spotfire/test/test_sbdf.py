@@ -1,4 +1,4 @@
-git checkout """Tests for importing and exporting data to SBDF files."""
+"""Tests for importing and exporting data to SBDF files."""
 
 from pathlib import Path
 import datetime
