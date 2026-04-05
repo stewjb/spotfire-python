@@ -900,8 +900,8 @@ class SbdfPolarsTest(unittest.TestCase):
                                       dt(1583, 1, 2, 0, 0, 0)],        dtype="datetime64[ms]"),
             "date_col":     [d(2020, 1, 1), None, d(1969, 7, 20), d(2024, 12, 31), d(1583, 1, 2)],
             "time_col":     [t(12, 0, 0), t(0, 0, 0), None, t(23, 59, 59), t(6, 30)],
-            "duration_col": pd.array([td(days=1), td(seconds=30), td(days=-1), pd.NaT, td(hours=2)],  # type: ignore[call-overload]
-                                     dtype="timedelta64[ms]"),
+            "duration_col": pd.array([td(days=1), td(seconds=30), td(days=-1), pd.NaT, td(hours=2)],
+                                     dtype="timedelta64[ms]"),  # type: ignore[call-overload]
             "string_col":   ["hello", "world", "foo", "bar", None],
             "binary_col":   [None, b"\x00\x01", b"\xff", b"", b"\xde\xad"],
         })
